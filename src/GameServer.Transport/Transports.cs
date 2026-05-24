@@ -40,3 +40,19 @@ public interface IBidirectionalTransport : IServerPushTransport, IClientCommandR
     /// <summary>Resolves the identical <c>ConnectionId</c> inherited from both base contracts.</summary>
     new ConnectionId ConnectionId { get; }
 }
+
+/// <summary>
+/// Optional capability for a transport that handles some inbound frames at the edge — pings it
+/// answers itself, frames it drops — without ever returning them from <see cref="IClientCommandReceiver.ReceiveAsync"/>.
+/// Such frames are real client activity, but the server's receive loop never sees them, so a client
+/// that sends only those would look idle and be reaped as a zombie. A transport implements this to
+/// expose a monotonic count of frames it has read from the wire (any kind); the server treats an
+/// advancing count as proof of life, distinguishing a genuinely silent socket (count never moves →
+/// reap) from a busy one whose traffic the transport consumes at the edge (count moves → keep alive).
+/// Transports whose <c>ReceiveAsync</c> returns once per inbound frame need not implement this.
+/// </summary>
+public interface IInboundActivityProbe
+{
+    /// <summary>Monotonic count of frames read from the wire over the connection's life (any kind).</summary>
+    long InboundFrameCount { get; }
+}

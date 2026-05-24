@@ -9,10 +9,10 @@ namespace GameServer.IntegrationTests;
 /// Gap #11 (tenant fairness) — no per-tenant room ceiling. <see cref="AdmissionPolicy"/> caps the
 /// GLOBAL room count (<c>MaxRooms</c>) but not rooms-per-tenant, so one tenant can open rooms until
 /// the global ceiling and starve every other tenant out of room capacity — a classic noisy
-/// neighbor. This scenario sets <c>MaxRoomsPerTenant = 3</c>, has tenant-a try to open 5 rooms and
-/// tenant-b open 5, and asserts tenant-a is capped at 3 (2 shed) while tenant-b is unaffected. It
-/// FAILS today (the edge ignores <c>MaxRoomsPerTenant</c>) and turns green once room admission
-/// enforces a per-tenant ceiling, shedding the overflow with <c>ServerError(Overloaded)</c>.
+/// neighbor. This scenario sets <c>MaxRoomsPerTenant = 3</c>, has both tenants try to open 5 rooms,
+/// and asserts each is independently capped at 3 (2 shed) — tenant-a exhausting its ceiling never
+/// eats into tenant-b's allowance. Room admission enforces the per-tenant ceiling, shedding the
+/// overflow with <c>ServerError(Overloaded)</c>.
 /// </summary>
 public sealed class PerTenantRoomCapScenario
 {
@@ -33,13 +33,17 @@ public sealed class PerTenantRoomCapScenario
             admission: new AdmissionPolicy(MaxRoomsPerTenant: capPerTenant));
 
         var (aCreated, aShed) = await OpenRoomsAsync(harness, "tenant-a", attempts);
-        var (bCreated, _) = await OpenRoomsAsync(harness, "tenant-b", attempts);
+        var (bCreated, bShed) = await OpenRoomsAsync(harness, "tenant-b", attempts);
 
-        _output.WriteLine($"tenant-a created {aCreated}/{attempts} (shed {aShed}); tenant-b created {bCreated}/{attempts}");
+        _output.WriteLine($"tenant-a created {aCreated}/{attempts} (shed {aShed}); tenant-b created {bCreated}/{attempts} (shed {bShed})");
 
-        Assert.Equal(capPerTenant, aCreated); // RED today: no per-tenant room enforcement -> all 5 created
+        Assert.Equal(capPerTenant, aCreated);
         Assert.Equal(attempts - capPerTenant, aShed);
-        Assert.Equal(attempts, bCreated); // tenant-b must be untouched by tenant-a's flood
+        // tenant-b gets its OWN independent per-tenant ceiling (also 3): tenant-a exhausting its
+        // ceiling never reduced tenant-b's allowance — that isolation is the noisy-neighbour
+        // protection. (A shared global cap would have let tenant-a starve tenant-b below 3.)
+        Assert.Equal(capPerTenant, bCreated);
+        Assert.Equal(attempts - capPerTenant, bShed);
     }
 
     private static async Task<(int Created, int Shed)> OpenRoomsAsync(IntegrationHarness harness, string tenant, int count)

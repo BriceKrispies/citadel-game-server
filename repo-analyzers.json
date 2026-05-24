@@ -13,5 +13,33 @@
     "**/obj/**",
     "**/Testing/**",
     "**/Migrations/**"
-  ]
+  ],
+
+  "//layering": "CITADEL0002/0003: concentric ring architecture. A project may use symbols only from the universal kernel (rank == universalRank) or the layer exactly one rank inward (strict adjacency). Composition roots wire all layers and are exempt. Any unranked GameServer.* project is an error.",
+  "layering": {
+    "universalRank": 0,
+    "layers": {
+      "GameServer.Protocol": 0,
+      "GameServer.Replication": 0,
+      "GameServer.Abstractions": 0,
+
+      "GameServer.Simulation": 1,
+      "GameServer.Tenancy": 1,
+      "GameServer.Identity": 1,
+      "GameServer.Persistence": 1,
+      "GameServer.Observability": 1,
+      "GameServer.ControlPlane": 1,
+
+      "GameServer.Routing": 2,
+      "GameServer.Admin": 2,
+
+      "GameServer.Transport": 3,
+      "GameServer.Cluster.Redis": 3
+    },
+    "compositionRoots": [
+      "GameServer.Host",
+      "GameServer.RoomWorkerHost",
+      "GameServer.LoadHarness"
+    ]
+  }
 }

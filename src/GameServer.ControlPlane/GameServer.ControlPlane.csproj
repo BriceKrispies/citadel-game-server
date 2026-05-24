@@ -1,10 +1,12 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
+  <!-- Control plane (rank 1). Depends only on the universal kernel (rank 0): the
+       Abstractions ports (join-token issuer/verifier, tenant context) and the Replication
+       policy types its catalog DTOs embed. -->
   <ItemGroup>
-    <ProjectReference Include="..\GameServer.Tenancy\GameServer.Tenancy.csproj" />
+    <ProjectReference Include="..\GameServer.Abstractions\GameServer.Abstractions.csproj" />
     <ProjectReference Include="..\GameServer.Protocol\GameServer.Protocol.csproj" />
     <ProjectReference Include="..\GameServer.Replication\GameServer.Replication.csproj" />
-    <ProjectReference Include="..\GameServer.Identity\GameServer.Identity.csproj" />
   </ItemGroup>
 
   <PropertyGroup>

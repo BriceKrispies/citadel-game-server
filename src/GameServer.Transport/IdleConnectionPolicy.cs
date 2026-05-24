@@ -48,9 +48,6 @@ public interface IIdleConnectionPolicy
 /// </summary>
 public sealed class HeartbeatIdlePolicy : IIdleConnectionPolicy
 {
-    private const string NotBuilt =
-        "HeartbeatIdlePolicy is a RED-phase seam: idle heartbeat/timeout evaluation is not implemented yet.";
-
     public HeartbeatIdlePolicy(TimeSpan heartbeatInterval, TimeSpan idleTimeout)
     {
         if (heartbeatInterval <= TimeSpan.Zero || idleTimeout <= heartbeatInterval)
@@ -58,17 +55,28 @@ public sealed class HeartbeatIdlePolicy : IIdleConnectionPolicy
             throw new ArgumentException("Idle timeout must be a positive value greater than the heartbeat interval.");
         }
 
-        _heartbeatInterval = heartbeatInterval;
-        _idleTimeout = idleTimeout;
+        HeartbeatInterval = heartbeatInterval;
+        IdleTimeout = idleTimeout;
     }
 
-    private readonly TimeSpan _heartbeatInterval;
-    private readonly TimeSpan _idleTimeout;
+    public TimeSpan HeartbeatInterval { get; }
 
-    public TimeSpan HeartbeatInterval => throw new NotImplementedException(NotBuilt);
+    public TimeSpan IdleTimeout { get; }
 
-    public TimeSpan IdleTimeout => throw new NotImplementedException(NotBuilt);
+    public IdleAction Evaluate(TimeSpan sinceLastInbound, TimeSpan sinceLastHeartbeat)
+    {
+        // Quiet past the idle deadline (no inbound, no pong): the connection is a zombie — reap it.
+        if (sinceLastInbound >= IdleTimeout)
+        {
+            return IdleAction.Disconnect;
+        }
 
-    public IdleAction Evaluate(TimeSpan sinceLastInbound, TimeSpan sinceLastHeartbeat) =>
-        throw new NotImplementedException(NotBuilt);
+        // Quiet past the heartbeat interval and we have not pinged recently: prove liveness.
+        if (sinceLastInbound >= HeartbeatInterval && sinceLastHeartbeat >= HeartbeatInterval)
+        {
+            return IdleAction.SendHeartbeat;
+        }
+
+        return IdleAction.KeepAlive;
+    }
 }

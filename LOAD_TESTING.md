@@ -16,6 +16,41 @@ browser/Selenium test and uses no JSON gameplay protocol.
 - It records: attempted/successful/failed/active connections; messages and bytes sent/received;
   server errors; unexpected closes; connect/handshake/join and input→snapshot latency;
   snapshot lag ticks; correction count; reconnect count; malformed-frame rejection count.
+- Per-room verification (both sides): client-side per-room receive tallies (how many of a room's
+  clients actually received snapshots, and the worst lag), plus a server-side cross-check that
+  polls the admin API so every room's authoritative `subscriberCount` and advancing `tick` are
+  proven from the server, not just inferred from the clients.
+
+## Load is driven by ClientCommand
+
+The harness sends `ClientCommand` (the message the platform forwards to the room and folds into
+the authoritative simulation), NOT `ClientInputFrame`. Input frames are currently discarded by the
+server's envelope mapper and do not count as connection liveness — a client that sends only input
+frames is reaped at the idle deadline. The command string is configurable (`command`, default
+`"MoveRight"` for `demo-game`; grid-walk uses `"Up"/"Down"/"Left"/"Right"`).
+
+## Authentication
+
+Control-plane calls (create-room, mint-token, admin observe) require an API key, sent as
+`Authorization: Bearer <key>`. Set `apiKey` in the scenario; it must be authorized for the
+scenario's `tenantId` (a per-tenant key suffices). Dev keys: `dev-tenant-a-key`, `dev-tenant-b-key`,
+`dev-admin-key`. Static-token scenarios skip the control plane and need no key.
+
+## Rooms and capacity (single box)
+
+`roomCount` rooms are provisioned up front and clients are round-robin assigned across the real
+room ids the control plane returns; each client's join token is minted for the exact room it joins
+(the realtime server rejects a join whose room differs from the token's claim). With
+`totalClients` divisible by `roomCount`, every room gets `totalClients / roomCount` players.
+
+Fan-out is the dominant cost: N rooms × P players/room × snapshot rate sends. At 50 rooms × 200
+players (`rooms-200.json`, 10k clients), a single dev box co-hosting the server and the harness
+saturates around ~3–4k concurrent connections — clients then starve on their send loop, go silent,
+and are idle-reaped (visible as high `unexpected closes` and `subscribers < expected` in the server
+check). All 10k still connect cumulatively and every room receives data, but the box cannot hold
+10k *concurrent* at that fan-out. To actually sustain 10k: run the harness on separate machine(s)
+from the server (see scaling) and/or reduce per-room fan-out. `rooms-200-local.json` (10 rooms ×
+200 = 2k) is sized to pass cleanly on one box.
 
 ## What it does NOT prove
 
@@ -40,8 +75,16 @@ In another terminal, run the smoke scenario (100 clients, 10 rooms, 2 inputs/s, 
 dotnet run --project src/GameServer.LoadHarness -- load/scenarios/local-smoke.json
 ```
 
-Results are written to `load/results/local-smoke/` (`*.result.json` + `*.timeseries.csv`),
-with a live console progress summary. Other scenarios live in `load/scenarios/`.
+Results are written to `load/results/local-smoke/` (`*.result.json` + `*.timeseries.csv` +
+`*.per-room.csv`), with a live console progress summary that ends in a per-room line and a
+`server check: PASS/FAIL` line. Other scenarios live in `load/scenarios/`.
+
+Per-room scenarios (200 players/room):
+
+```
+dotnet run --project src/GameServer.LoadHarness -- load/scenarios/rooms-200-local.json   # 10 rooms × 200 = 2k (passes on one box)
+dotnet run --project src/GameServer.LoadHarness -- load/scenarios/rooms-200.json          # 50 rooms × 200 = 10k (needs distribution)
+```
 
 ## Scale across many load-generator machines
 

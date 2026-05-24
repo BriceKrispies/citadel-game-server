@@ -477,11 +477,19 @@ Analyzer Rule (CITADEL0001)
 - The analyzer (tools/RepoAnalyzers/Citadel.RepoAnalyzers) enforces that production .cs files have a co-located test (Name + requiredTestSuffix, default Name.Tests.cs). It is wired into every production build as a non-fatal warning.
 - Ignored categories must be explicit in repo-analyzers.json (ignoredPathGlobs, ignoredFileSuffixes, ignoredGeneratedFiles, requiredTestSuffix). The ignore system is open-ended: add categories in the config, not in code.
 
+Layered Architecture (CITADEL0002 / CITADEL0003)
+
+- The system is a concentric ring architecture, enforced as a build ERROR by LayerDependencyAnalyzer (same analyzer package). Detection is by USED SYMBOL (a symbol's owning assembly), not by project reference, so it also catches coupling that leaks transitively through an otherwise-allowed reference.
+- Rings are ranked in repo-analyzers.json ("layering"): rank 0 is the universal shared kernel (GameServer.Abstractions ports + GameServer.Protocol + GameServer.Replication) and may be used from anywhere. For every other rank, strict adjacency holds: a project may use symbols only from the universal kernel or the layer exactly one rank inward. Reaching outward, sideways (same non-kernel rank), or skipping a ring is CITADEL0002.
+- Current ranks: 0 = Abstractions/Protocol/Replication; 1 = Simulation (core), Tenancy, Identity, Persistence, Observability, ControlPlane; 2 = Routing, Admin; 3 = Transport. Composition roots (Host, RoomWorkerHost, LoadHarness) wire all layers and are exempt. Any unranked GameServer.* project that is not a composition root is CITADEL0003.
+- GameServer.Abstractions holds PORTS ONLY — pure interfaces and the immutable value/DTO types they expose (no concrete logic, no infrastructure). Implementations (InMemory*, File*, Hs256*, SystemClock, GameRoom, the metric aggregators, etc.) live in their rank-1 service project and are wired only at composition roots. When you add a port, put the interface/DTO in Abstractions and the adapter in the service ring. Note: moved ports keep their original namespace (e.g. ISimulationClock is still namespace GameServer.Simulation) — the rule enforces by assembly, not namespace.
+- Adding a new project: give it a rank in repo-analyzers.json (or list it as a composition root), or the build fails with CITADEL0003.
+
 Repository Validation Commands
 
 - Fast unit tests:      dotnet test tests/GameServer.Tests/GameServer.Tests.csproj
 - Analyzer tests:       dotnet test tools/RepoAnalyzers/Citadel.RepoAnalyzers.Tests/Citadel.RepoAnalyzers.Tests.csproj
-- Full solution build:  dotnet build Citadel.slnx   (also runs the CITADEL0001 analyzer over the repo)
+- Full solution build:  dotnet build Citadel.slnx   (runs CITADEL0001/0002/0003 over the repo; layer violations fail the build)
 - Mutation testing:     dotnet tool restore; then dotnet stryker --project <ProjectName>.csproj   (deeper validation, not part of the fast loop)
 
 Load and Backpressure

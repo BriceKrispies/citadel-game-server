@@ -1,9 +1,11 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <ItemGroup>
-    <!-- Simulation depends only on pure, infrastructure-free models: the Protocol
-         identifiers and the Replication entity model (the projection target for a
-         game's state). No persistence, observability, transport, or wall-clock time. -->
+    <!-- Core domain (rank 1). Depends only on the universal kernel (rank 0): the
+         Abstractions ports it implements (IGameRoom/IGameSimulation/ISimulationClock/
+         IRandomSource and the room contract DTOs), the Protocol identifiers, and the
+         Replication entity model. No persistence, observability, transport, or wall-clock time. -->
+    <ProjectReference Include="..\GameServer.Abstractions\GameServer.Abstractions.csproj" />
     <ProjectReference Include="..\GameServer.Protocol\GameServer.Protocol.csproj" />
     <ProjectReference Include="..\GameServer.Replication\GameServer.Replication.csproj" />
   </ItemGroup>

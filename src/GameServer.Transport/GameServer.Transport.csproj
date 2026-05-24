@@ -1,14 +1,15 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
+  <!-- Edge ring (rank 3). Strict adjacency: may reference only the adjacent inner ring
+       (Routing, rank 2) plus the universal kernel (rank 0: Abstractions ports, Protocol
+       contracts, and the Replication engine it drives). It consumes rooms as the IGameRoom
+       PORT (Abstractions) and never the Simulation/Tenancy/Persistence/Observability
+       implementations — those are wired at the composition root. -->
   <ItemGroup>
+    <ProjectReference Include="..\GameServer.Abstractions\GameServer.Abstractions.csproj" />
     <ProjectReference Include="..\GameServer.Protocol\GameServer.Protocol.csproj" />
-    <ProjectReference Include="..\GameServer.Identity\GameServer.Identity.csproj" />
-    <ProjectReference Include="..\GameServer.Routing\GameServer.Routing.csproj" />
-    <ProjectReference Include="..\GameServer.Tenancy\GameServer.Tenancy.csproj" />
-    <ProjectReference Include="..\GameServer.Simulation\GameServer.Simulation.csproj" />
-    <ProjectReference Include="..\GameServer.Persistence\GameServer.Persistence.csproj" />
-    <ProjectReference Include="..\GameServer.Observability\GameServer.Observability.csproj" />
     <ProjectReference Include="..\GameServer.Replication\GameServer.Replication.csproj" />
+    <ProjectReference Include="..\GameServer.Routing\GameServer.Routing.csproj" />
   </ItemGroup>
 
   <PropertyGroup>

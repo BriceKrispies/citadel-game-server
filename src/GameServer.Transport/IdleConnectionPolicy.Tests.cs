@@ -2,12 +2,11 @@ using Xunit;
 
 namespace GameServer.Transport;
 
-/// <summary>
-/// Contract guards for the <see cref="HeartbeatIdlePolicy"/> seam: construction validates the
-/// interval/timeout ordering, and evaluation reports it is not implemented yet.
-/// </summary>
 public sealed class IdleConnectionPolicyTests
 {
+    private static HeartbeatIdlePolicy Policy() =>
+        new(heartbeatInterval: TimeSpan.FromSeconds(15), idleTimeout: TimeSpan.FromSeconds(60));
+
     [Fact]
     public void Construction_WithTimeoutNotBeyondHeartbeat_Throws()
     {
@@ -16,9 +15,23 @@ public sealed class IdleConnectionPolicyTests
     }
 
     [Fact]
-    public void Evaluate_IsNotImplementedYet()
+    public void Active_Connection_IsKeptAlive()
     {
-        var policy = new HeartbeatIdlePolicy(TimeSpan.FromSeconds(15), TimeSpan.FromSeconds(60));
-        Assert.Throws<NotImplementedException>(() => policy.Evaluate(TimeSpan.FromSeconds(90), TimeSpan.FromSeconds(90)));
+        Assert.Equal(IdleAction.KeepAlive, Policy().Evaluate(
+            sinceLastInbound: TimeSpan.FromSeconds(2), sinceLastHeartbeat: TimeSpan.FromSeconds(2)));
+    }
+
+    [Fact]
+    public void Quiet_PastHeartbeatInterval_SendsHeartbeat()
+    {
+        Assert.Equal(IdleAction.SendHeartbeat, Policy().Evaluate(
+            sinceLastInbound: TimeSpan.FromSeconds(20), sinceLastHeartbeat: TimeSpan.FromSeconds(20)));
+    }
+
+    [Fact]
+    public void Quiet_PastIdleTimeout_Disconnects()
+    {
+        Assert.Equal(IdleAction.Disconnect, Policy().Evaluate(
+            sinceLastInbound: TimeSpan.FromSeconds(90), sinceLastHeartbeat: TimeSpan.FromSeconds(90)));
     }
 }

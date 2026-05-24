@@ -9,6 +9,15 @@ public sealed record LatencyStats(long Count, double MinMs, double MaxMs, double
     public static readonly LatencyStats Empty = new(0, 0, 0, 0, 0, 0, 0);
 }
 
+/// <summary>
+/// Per-room receive tally from the client side: how many of a room's clients actually
+/// received at least one snapshot, how many snapshots that room's clients received in
+/// total, the highest server tick observed in the room, and the worst snapshot lag.
+/// This is the harness's own answer to "is each room receiving updates" — cross-checked
+/// against the server's authoritative <c>subscriberCount</c> via the admin API.
+/// </summary>
+public sealed record RoomMetric(string Room, long ClientsReceiving, long SnapshotsReceived, ulong MaxServerTick, long MaxSnapshotLagTicks);
+
 /// <summary>An immutable point-in-time view of all recorded metrics.</summary>
 public sealed record MetricsSnapshot
 {
@@ -31,6 +40,9 @@ public sealed record MetricsSnapshot
     public LatencyStats HandshakeLatency { get; init; } = LatencyStats.Empty;
     public LatencyStats JoinLatency { get; init; } = LatencyStats.Empty;
     public LatencyStats InputToSnapshotLatency { get; init; } = LatencyStats.Empty;
+
+    /// <summary>Per-room receive tallies, ordered by room id.</summary>
+    public IReadOnlyList<RoomMetric> PerRoom { get; init; } = Array.Empty<RoomMetric>();
 }
 
 /// <summary>
@@ -48,6 +60,7 @@ public sealed class MetricsRecorder
     private readonly Samples _handshake = new();
     private readonly Samples _join = new();
     private readonly Samples _inputToSnapshot = new();
+    private readonly ConcurrentDictionary<string, RoomTally> _byRoom = new();
 
     public void IncrementAttemptedConnections() => Interlocked.Increment(ref _attempted);
     public void IncrementSuccessfulConnections() => Interlocked.Increment(ref _successful);
@@ -76,6 +89,14 @@ public sealed class MetricsRecorder
     public void RecordHandshakeLatency(TimeSpan latency) => _handshake.Add(latency.TotalMilliseconds);
     public void RecordJoinLatency(TimeSpan latency) => _join.Add(latency.TotalMilliseconds);
     public void RecordInputToSnapshotLatency(TimeSpan latency) => _inputToSnapshot.Add(latency.TotalMilliseconds);
+
+    /// <summary>Records that a client received its first snapshot in <paramref name="room"/>.</summary>
+    public void RecordRoomClientReceiving(string room) =>
+        _byRoom.GetOrAdd(room, _ => new RoomTally()).MarkClientReceiving();
+
+    /// <summary>Records one snapshot a client received in <paramref name="room"/>.</summary>
+    public void RecordRoomSnapshot(string room, ulong serverTick, long lagTicks) =>
+        _byRoom.GetOrAdd(room, _ => new RoomTally()).Record(serverTick, lagTicks);
 
     public void RecordSnapshotLag(long lagTicks)
     {
@@ -111,7 +132,50 @@ public sealed class MetricsRecorder
         HandshakeLatency = _handshake.Compute(),
         JoinLatency = _join.Compute(),
         InputToSnapshotLatency = _inputToSnapshot.Compute(),
+        PerRoom = _byRoom
+            .Select(kv => kv.Value.ToMetric(kv.Key))
+            .OrderBy(m => m.Room, StringComparer.Ordinal)
+            .ToArray(),
     };
+
+    /// <summary>Thread-safe receive tally for one room. Shared across that room's clients.</summary>
+    private sealed class RoomTally
+    {
+        private long _clientsReceiving;
+        private long _snapshots;
+        private long _maxServerTick;
+        private long _maxLag;
+
+        public void MarkClientReceiving() => Interlocked.Increment(ref _clientsReceiving);
+
+        public void Record(ulong serverTick, long lagTicks)
+        {
+            Interlocked.Increment(ref _snapshots);
+            UpdateMax(ref _maxServerTick, (long)serverTick);
+            UpdateMax(ref _maxLag, lagTicks);
+        }
+
+        public RoomMetric ToMetric(string room) => new(
+            room,
+            Interlocked.Read(ref _clientsReceiving),
+            Interlocked.Read(ref _snapshots),
+            (ulong)Interlocked.Read(ref _maxServerTick),
+            Interlocked.Read(ref _maxLag));
+
+        private static void UpdateMax(ref long target, long candidate)
+        {
+            long current;
+            do
+            {
+                current = Interlocked.Read(ref target);
+                if (candidate <= current)
+                {
+                    return;
+                }
+            }
+            while (Interlocked.CompareExchange(ref target, candidate, current) != current);
+        }
+    }
 
     private sealed class Samples
     {

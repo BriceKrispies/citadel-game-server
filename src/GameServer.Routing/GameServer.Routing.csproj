@@ -1,11 +1,13 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
+  <!-- Composition ring (rank 2). Strict adjacency: may reference only the adjacent inner
+       ring (Simulation, rank 1, for IGameRoom/GameRoomFactory) plus the universal kernel
+       (rank 0: Abstractions ports + Protocol). Persistence/Observability/Tenancy are reached
+       through their kernel PORTS (Abstractions), never their rank-1 implementations. -->
   <ItemGroup>
+    <ProjectReference Include="..\GameServer.Abstractions\GameServer.Abstractions.csproj" />
     <ProjectReference Include="..\GameServer.Protocol\GameServer.Protocol.csproj" />
-    <ProjectReference Include="..\GameServer.Tenancy\GameServer.Tenancy.csproj" />
     <ProjectReference Include="..\GameServer.Simulation\GameServer.Simulation.csproj" />
-    <ProjectReference Include="..\GameServer.Persistence\GameServer.Persistence.csproj" />
-    <ProjectReference Include="..\GameServer.Observability\GameServer.Observability.csproj" />
   </ItemGroup>
 
   <PropertyGroup>

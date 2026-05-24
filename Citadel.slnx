@@ -1,25 +1,34 @@
 <Solution>
-  <Folder Name="/src/">
-    <Project Path="src/GameServer.Admin/GameServer.Admin.csproj" />
-    <Project Path="src/GameServer.ControlPlane/GameServer.ControlPlane.csproj" />
-    <Project Path="src/GameServer.Host/GameServer.Host.csproj" />
-    <Project Path="src/GameServer.Identity/GameServer.Identity.csproj" />
-    <Project Path="src/GameServer.LoadHarness/GameServer.LoadHarness.csproj" />
-    <Project Path="src/GameServer.Observability/GameServer.Observability.csproj" />
-    <Project Path="src/GameServer.Persistence/GameServer.Persistence.csproj" />
+  <Folder Name="/src/0-Kernel/">
+    <Project Path="src/GameServer.Abstractions/GameServer.Abstractions.csproj" />
     <Project Path="src/GameServer.Protocol/GameServer.Protocol.csproj" />
     <Project Path="src/GameServer.Replication/GameServer.Replication.csproj" />
-    <Project Path="src/GameServer.RoomWorkerHost/GameServer.RoomWorkerHost.csproj" />
-    <Project Path="src/GameServer.Routing/GameServer.Routing.csproj" />
+  </Folder>
+  <Folder Name="/src/1-Core/">
     <Project Path="src/GameServer.Simulation/GameServer.Simulation.csproj" />
     <Project Path="src/GameServer.Tenancy/GameServer.Tenancy.csproj" />
+    <Project Path="src/GameServer.Identity/GameServer.Identity.csproj" />
+    <Project Path="src/GameServer.Persistence/GameServer.Persistence.csproj" />
+    <Project Path="src/GameServer.Observability/GameServer.Observability.csproj" />
+    <Project Path="src/GameServer.ControlPlane/GameServer.ControlPlane.csproj" />
+  </Folder>
+  <Folder Name="/src/2-Composition/">
+    <Project Path="src/GameServer.Routing/GameServer.Routing.csproj" />
+    <Project Path="src/GameServer.Admin/GameServer.Admin.csproj" />
+  </Folder>
+  <Folder Name="/src/3-Edge/">
     <Project Path="src/GameServer.Transport/GameServer.Transport.csproj" />
+    <Project Path="src/GameServer.Cluster.Redis/GameServer.Cluster.Redis.csproj" />
+  </Folder>
+  <Folder Name="/src/Hosts/">
+    <Project Path="src/GameServer.Host/GameServer.Host.csproj" />
+    <Project Path="src/GameServer.RoomWorkerHost/GameServer.RoomWorkerHost.csproj" />
+    <Project Path="src/GameServer.LoadHarness/GameServer.LoadHarness.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/GameServer.IntegrationTests/GameServer.IntegrationTests.csproj" />
     <Project Path="tests/GameServer.Tests/GameServer.Tests.csproj" />
   </Folder>
-  <Folder Name="/tools/" />
   <Folder Name="/tools/RepoAnalyzers/">
     <Project Path="tools/RepoAnalyzers/Citadel.RepoAnalyzers.Tests/Citadel.RepoAnalyzers.Tests.csproj" />
     <Project Path="tools/RepoAnalyzers/Citadel.RepoAnalyzers/Citadel.RepoAnalyzers.csproj" />

@@ -27,6 +27,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\..\src\GameServer.Abstractions\GameServer.Abstractions.csproj" />
     <ProjectReference Include="..\..\src\GameServer.Host\GameServer.Host.csproj" />
     <!-- Referenced so the child worker executable is built and copied next to the test
          binaries, where the cross-process scenario launches it by dll path. -->

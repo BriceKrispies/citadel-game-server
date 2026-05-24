@@ -23,11 +23,14 @@ public interface IWebSocketChannel
 /// the server: the adapter answers with a <see cref="ServerError"/> and moves on,
 /// so one malformed frame cannot corrupt the session.
 /// </summary>
-public sealed class WebSocketChannelTransport : IBidirectionalTransport
+public sealed class WebSocketChannelTransport : IBidirectionalTransport, IInboundActivityProbe
 {
     private readonly IWebSocketChannel _channel;
     private readonly IMessageCodec _codec;
     private long _errorSequence;
+    // Counts every text frame read, including malformed ones answered at the edge and never
+    // forwarded, so the server can tell an active client from a silent one (see IInboundActivityProbe).
+    private long _inboundFrameCount;
 
     public WebSocketChannelTransport(IWebSocketChannel channel, IMessageCodec codec, ConnectionId connectionId)
     {
@@ -37,6 +40,8 @@ public sealed class WebSocketChannelTransport : IBidirectionalTransport
     }
 
     public ConnectionId ConnectionId { get; }
+
+    public long InboundFrameCount => Interlocked.Read(ref _inboundFrameCount);
 
     public async Task SendAsync(MessageEnvelope message, CancellationToken cancellationToken = default)
     {
@@ -48,6 +53,7 @@ public sealed class WebSocketChannelTransport : IBidirectionalTransport
     {
         while (await _channel.ReceiveTextAsync(cancellationToken).ConfigureAwait(false) is { } text)
         {
+            Interlocked.Increment(ref _inboundFrameCount);
             try
             {
                 return _codec.Decode(text);

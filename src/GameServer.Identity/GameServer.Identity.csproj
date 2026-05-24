@@ -6,6 +6,10 @@
     and the realtime transport edge (which verifies them) can reference it without
     coupling to each other, and so the simulation kernel never gains an auth dependency.
   -->
+  <ItemGroup>
+    <ProjectReference Include="..\GameServer.Abstractions\GameServer.Abstractions.csproj" />
+  </ItemGroup>
+
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>

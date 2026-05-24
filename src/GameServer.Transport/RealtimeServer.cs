@@ -76,6 +76,10 @@ public sealed class RealtimeServer
     // 0 = unbounded (never truncate). >0 keeps that many trailing ticks of events; older
     // events are covered by the saved snapshot and compacted away.
     private readonly int _eventLogRetentionTicks;
+    // How long a connection may stay silent before the handshake (pre-ClientHello) or while
+    // established (post-hello) before it is reaped, so half-open/zombie sockets cannot accumulate.
+    private readonly TimeSpan _handshakeTimeout;
+    private readonly IIdleConnectionPolicy _idlePolicy;
 
     // Admission counters. Guarded by _admissionLock (per-connection, not on the hot path).
     private readonly object _admissionLock = new();
@@ -97,7 +101,9 @@ public sealed class RealtimeServer
         Func<GameId, ReplicationPolicy>? policyProvider = null,
         RoomLifecycle lifecycle = RoomLifecycle.Persist,
         AdmissionPolicy? admission = null,
-        int eventLogRetentionTicks = 0)
+        int eventLogRetentionTicks = 0,
+        TimeSpan? handshakeTimeout = null,
+        IIdleConnectionPolicy? idlePolicy = null)
     {
         _tenants = tenants;
         _router = router;
@@ -110,9 +116,28 @@ public sealed class RealtimeServer
         _lifecycle = lifecycle;
         _admission = admission ?? AdmissionPolicy.Unlimited;
         _eventLogRetentionTicks = eventLogRetentionTicks;
+        // A connection that never completes the handshake is reaped quickly (slowloris/zombie
+        // protection); an established connection gets the generous idle window from the policy.
+        _handshakeTimeout = handshakeTimeout ?? TimeSpan.FromSeconds(1);
+        _idlePolicy = idlePolicy ?? new HeartbeatIdlePolicy(TimeSpan.FromSeconds(15), TimeSpan.FromSeconds(30));
     }
 
     private object RoomLock(RoomKey key) => _roomLocks.GetOrAdd(key, _ => new object());
+
+    /// <summary>Rooms currently placed for a tenant — the basis for the per-tenant room ceiling.</summary>
+    private int TenantRoomCount(TenantId tenant)
+    {
+        var count = 0;
+        foreach (var key in _subscribers.Keys)
+        {
+            if (key.TenantId.Equals(tenant))
+            {
+                count++;
+            }
+        }
+
+        return count;
+    }
 
     /// <summary>Connections currently admitted and open. A capacity gauge for scenarios/ops.</summary>
     public int ActiveConnectionCount
@@ -152,12 +177,59 @@ public sealed class RealtimeServer
         _telemetry.Increment(TelemetryMetrics.ConnectionsOpened);
         _telemetry.Event(TelemetryEvents.ConnectionOpened, Tags(("connectionId", transport.ConnectionId.Value)));
 
+        // Some transports answer pings and drop frames at the edge, so those never surface here as
+        // inbound messages. They are still proof the client is alive; without this probe a client
+        // sending only such frames would look idle and be wrongly reaped (see IInboundActivityProbe).
+        var activityProbe = transport as IInboundActivityProbe;
+
         try
         {
-            while (await transport.ReceiveAsync(cancellationToken).ConfigureAwait(false) is { } inbound)
+            // The pending receive is held across idle-deadline checks rather than re-issued, so a
+            // frame that arrives while we were timing out is never dropped — the next wait observes it.
+            var receiveTask = transport.ReceiveAsync(cancellationToken);
+            while (true)
             {
+                // Before the handshake completes a connection gets a short deadline; once
+                // established it gets the policy's generous idle window. Either way a silent
+                // connection is reaped rather than parking a task forever.
+                var deadline = connection.Session is null ? _handshakeTimeout : _idlePolicy.IdleTimeout;
+                var activityBefore = activityProbe?.InboundFrameCount ?? 0;
+
+                MessageEnvelope? inbound;
+                try
+                {
+                    inbound = await receiveTask.WaitAsync(deadline, cancellationToken).ConfigureAwait(false);
+                }
+                catch (TimeoutException)
+                {
+                    // Once established, wire frames the transport handled at the edge (a ping it
+                    // answered, a frame it dropped) prove the client is alive — re-arm the deadline
+                    // on the same pending receive. Before the handshake completes, the deadline is
+                    // absolute slowloris protection: the client must actually finish the handshake,
+                    // so ping noise does not buy it more time.
+                    if (connection.Session is not null
+                        && activityProbe is not null
+                        && activityProbe.InboundFrameCount != activityBefore)
+                    {
+                        continue;
+                    }
+
+                    // Silent past the deadline (never said hello, or went quiet while established):
+                    // a half-open/zombie connection. Reap it. Observable, never silent.
+                    _telemetry.Event(TelemetryEvents.ConnectionDropped, Tags(
+                        ("connectionId", transport.ConnectionId.Value),
+                        ("reason", connection.Session is null ? "handshake_timeout" : "idle_timeout")));
+                    break;
+                }
+
+                if (inbound is null)
+                {
+                    break; // the client closed the connection
+                }
+
                 _telemetry.Increment(TelemetryMetrics.MessagesIn, Tags(("messageType", inbound.MessageType.ToString())));
                 await ProcessAsync(connection, inbound, cancellationToken).ConfigureAwait(false);
+                receiveTask = transport.ReceiveAsync(cancellationToken);
             }
         }
         finally
@@ -260,6 +332,10 @@ public sealed class RealtimeServer
             }
 
             connections.TryRemove(connection.Id, out _);
+
+            // The connection is gone for good under Reap: release its outbound buffer (and any
+            // background writer) so it does not linger.
+            _ = connection.Outbound.DisposeAsync();
 
             // Drop this viewer's delta baseline so it does not linger in the replicator.
             if (_replicators.TryGetValue(key, out var replicator))
@@ -427,21 +503,26 @@ public sealed class RealtimeServer
             // under delta/interest/budget even when message count stays flat.
             _telemetry.Measure(TelemetryMetrics.SnapshotEntities, entities.Count);
 
-            try
+            // Hand the snapshot to the connection's outbound buffer; this never awaits the
+            // socket, so one slow client cannot stall the tick for everyone in the room. The
+            // delta baseline still advances only on ack (see HandleAckAsync), never on a send.
+            var envelope = connection.BuildSnapshot(tick, entities, traceId);
+            switch (connection.Outbound.TryEnqueue(envelope))
             {
-                var envelope = connection.BuildSnapshot(tick, entities, traceId);
-                await connection.Transport.SendAsync(envelope, cancellationToken).ConfigureAwait(false);
-                _telemetry.Increment(TelemetryMetrics.MessagesOut, Tags(("messageType", nameof(MessageType.ServerSnapshot))));
-                // The delta baseline advances only when the client acknowledges this
-                // tick (see HandleAckAsync); a successful send is not proof of receipt.
-            }
-            catch (Exception ex)
-            {
-                // The connection is no longer writable (e.g. closed socket): drop it
-                // so it stops receiving fan-out. Observable, never silent.
-                dropped.Add(connection.Id);
-                _telemetry.Event(TelemetryEvents.ConnectionDropped,
-                    Tags(("connectionId", connection.Id.Value), ("reason", ex.GetType().Name)));
+                case OutboundEnqueueResult.Enqueued:
+                    _telemetry.Increment(TelemetryMetrics.MessagesOut, Tags(("messageType", nameof(MessageType.ServerSnapshot))));
+                    break;
+                case OutboundEnqueueResult.DroppedQueueFull:
+                    // The client is too far behind to keep up; shed this snapshot rather than
+                    // block or buffer without bound. Observable as backpressure, never silent.
+                    _telemetry.Increment(TelemetryMetrics.BackpressureRejections);
+                    break;
+                case OutboundEnqueueResult.DroppedClosed:
+                    // The connection is no longer writable: drop it so it stops receiving fan-out.
+                    dropped.Add(connection.Id);
+                    _telemetry.Event(TelemetryEvents.ConnectionDropped,
+                        Tags(("connectionId", connection.Id.Value), ("reason", "outbound_closed")));
+                    break;
             }
         }
 
@@ -565,10 +646,23 @@ public sealed class RealtimeServer
         // can never interleave with a concurrent last-leaver reap (see OnDisconnect). A
         // join that would create a NEW room beyond the room ceiling is shed here.
         var admitted = false;
+        var rejectReason = "max_rooms";
         lock (RoomLock(key))
         {
             var isNewRoom = !_subscribers.ContainsKey(key);
-            if (!isNewRoom || _subscribers.Count < _admission.MaxRooms)
+            // A join that would create a NEW room is checked against both the global ceiling and
+            // the per-tenant ceiling, so one tenant cannot consume global room capacity and
+            // starve the others (noisy-neighbour isolation). Joins into an already-running room
+            // never count against a ceiling.
+            if (isNewRoom && TenantRoomCount(session.Tenant.TenantId) >= _admission.MaxRoomsPerTenant)
+            {
+                rejectReason = "tenant_max_rooms";
+            }
+            else if (isNewRoom && _subscribers.Count >= _admission.MaxRooms)
+            {
+                rejectReason = "max_rooms";
+            }
+            else
             {
                 var room = _router.GetOrCreateRoom(session.Tenant, join.RoomId, gameId);
                 lock (room)
@@ -588,7 +682,7 @@ public sealed class RealtimeServer
 
         if (!admitted)
         {
-            _telemetry.Increment(TelemetryMetrics.AdmissionRejected, Tags(("reason", "max_rooms")));
+            _telemetry.Increment(TelemetryMetrics.AdmissionRejected, Tags(("reason", rejectReason)));
             await RejectAsync(connection, inbound, ServerErrorCode.Overloaded,
                 "Server is at room capacity; retry later.", cancellationToken).ConfigureAwait(false);
             return;
@@ -708,15 +802,23 @@ public sealed class RealtimeServer
     /// <summary>Per-connection state: identity, the resolved session, room placement, and the outbound sequence.</summary>
     private sealed class Connection
     {
+        // Per-connection outbound buffer depth. A slow client may fall this many snapshots behind
+        // before fan-out starts dropping its messages (it is never allowed to block the tick).
+        private const int OutboundCapacity = 256;
+
         private long _outboundSequence;
 
         public Connection(IServerPushTransport transport, JoinTokenClaims principal)
         {
             Transport = transport;
             Principal = principal;
+            Outbound = new BoundedOutboundChannel(transport, OutboundCapacity);
         }
 
         public IServerPushTransport Transport { get; }
+
+        /// <summary>This connection's non-blocking outbound buffer; fan-out enqueues here, never awaiting the socket.</summary>
+        public IOutboundChannel Outbound { get; }
 
         /// <summary>The verified identity this connection is authorized for (from its join token).</summary>
         public JoinTokenClaims Principal { get; }

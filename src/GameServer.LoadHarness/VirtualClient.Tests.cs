@@ -45,26 +45,30 @@ public sealed class VirtualClientTests
     }
 
     [Fact]
-    public async Task VirtualClient_SequencesInputFramesMonotonically()
+    public async Task VirtualClient_SendsForwardableCommandsWithMonotonicSequence()
     {
+        // Load MUST be driven by ClientCommand (the message the server forwards to the room),
+        // not ClientInputFrame (which the platform discards and does not count as liveness —
+        // a client sending only input frames is reaped at the idle deadline).
         var connection = new FakeWebSocketConnection();
         var client = NewClient(0, connection, new MetricsRecorder(), new FailureRecorder());
 
         for (var i = 0; i < 5; i++)
         {
-            await client.SendInputFrameAsync(CancellationToken.None);
+            await client.SendCommandAsync(CancellationToken.None);
         }
 
-        var inputs = connection.Sent
+        var commands = connection.Sent
             .Select(Codec.Decode)
-            .Where(e => e.PayloadCase == RealtimeEnvelope.PayloadOneofCase.ClientInputFrame)
+            .Where(e => e.PayloadCase == RealtimeEnvelope.PayloadOneofCase.ClientCommand)
             .ToList();
 
-        Assert.Equal(5, inputs.Count);
-        for (var i = 1; i < inputs.Count; i++)
+        Assert.Equal(5, commands.Count);
+        Assert.All(commands, c => Assert.Equal("MoveRight", c.ClientCommand.Command));
+        for (var i = 1; i < commands.Count; i++)
         {
-            Assert.True(inputs[i].Sequence > inputs[i - 1].Sequence, "envelope sequence must strictly increase");
-            Assert.True(inputs[i].ClientInputFrame.ClientTick > inputs[i - 1].ClientInputFrame.ClientTick, "client tick must strictly increase");
+            Assert.True(commands[i].Sequence > commands[i - 1].Sequence, "envelope sequence must strictly increase");
+            Assert.True(commands[i].ClientTick > commands[i - 1].ClientTick, "client tick must strictly increase");
         }
     }
 

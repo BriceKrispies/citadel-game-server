@@ -1,0 +1,76 @@
+Starting 'rooms-200' (sustained-input): 10000 clients, ramp 60s, steady 60s
+  t+1s active=166 sent=497 recv=1045 errors=0
+  t+2s active=337 sent=1504 recv=3760 errors=0
+  t+3s active=504 sent=2996 recv=8139 errors=0
+  t+4s active=672 sent=4993 recv=14185 errors=0
+  t+5s active=841 sent=7477 recv=21902 errors=0
+  t+6s active=1010 sent=10455 recv=31282 errors=0
+  t+7s active=1178 sent=13942 recv=42329 errors=0
+  t+8s active=1348 sent=18029 recv=55046 errors=0
+  t+9s active=1512 sent=22340 recv=69714 errors=0
+  t+10s active=1679 sent=27379 recv=86954 errors=0
+  t+11s active=1848 sent=33009 recv=104556 errors=0
+  t+12s active=2024 sent=38978 recv=124825 errors=0
+  t+13s active=2192 sent=45585 recv=146205 errors=0
+  t+14s active=2362 sent=52511 recv=169250 errors=0
+  t+15s active=2497 sent=58687 recv=193850 errors=0
+  t+16s active=2697 sent=66948 recv=220550 errors=0
+  t+17s active=2862 sent=75710 recv=251151 errors=0
+  t+18s active=3030 sent=84980 recv=280981 errors=0
+  t+19s active=3197 sent=93598 recv=312408 errors=0
+  t+20s active=3348 sent=100729 recv=344362 errors=0
+  t+21s active=3533 sent=109294 recv=381739 errors=0
+  t+22s active=3676 sent=115721 recv=417781 errors=0
+  t+24s active=3748 sent=119878 recv=457892 errors=0
+  t+28s active=4047 sent=127608 recv=613856 errors=0
+  t+29s active=4136 sent=128055 recv=658413 errors=0
+  t+30s active=4212 sent=128434 recv=703884 errors=0
+  t+31s active=4271 sent=128729 recv=750948 errors=0
+  t+32s active=4420 sent=133518 recv=798119 errors=0
+  t+33s active=4441 sent=138170 recv=839229 errors=0
+  t+34s active=5096 sent=139667 recv=886836 errors=0
+  t+35s active=5191 sent=139956 recv=932550 errors=0
+  t+36s active=5191 sent=140013 recv=981099 errors=0
+  t+37s active=5191 sent=140070 recv=1043189 errors=0
+  t+38s active=5191 sent=140125 recv=1107466 errors=0
+  t+39s active=5191 sent=140206 recv=1162245 errors=0
+  t+64s active=1442 sent=142992 recv=2398936 errors=0
+  t+65s active=2528 sent=149471 recv=2404315 errors=0
+  t+98s active=3124 sent=160269 recv=3427666 errors=0
+  t+99s active=2993 sent=160916 recv=3448535 errors=0
+  t+100s active=2410 sent=163631 recv=3471905 errors=0
+  t+101s active=3285 sent=165600 recv=3499290 errors=0
+  t+102s active=3800 sent=166761 recv=3533289 errors=0
+  t+137s active=177 sent=168313 recv=4631548 errors=0
+  t+138s active=155 sent=168778 recv=4633253 errors=0
+  t+139s active=155 sent=169243 recv=4634803 errors=0
+  t+140s active=155 sent=169708 recv=4636353 errors=0
+  t+141s active=155 sent=170174 recv=4637904 errors=0
+  t+142s active=155 sent=170640 recv=4639455 errors=0
+  t+143s active=155 sent=171105 recv=4641005 errors=0
+  t+144s active=155 sent=171572 recv=4642557 errors=0
+  t+145s active=155 sent=172037 recv=4644262 errors=0
+  t+146s active=155 sent=172503 recv=4645813 errors=0
+  t+147s active=155 sent=172969 recv=4647366 errors=0
+  t+148s active=155 sent=173506 recv=4649063 errors=0
+  t+149s active=155 sent=173901 recv=4650613 errors=0
+  t+150s active=155 sent=174366 recv=4652163 errors=0
+  t+151s active=155 sent=174832 recv=4653714 errors=0
+  t+152s active=155 sent=175298 recv=4655420 errors=0
+  t+153s active=155 sent=175763 recv=4656970 errors=0
+  t+154s active=155 sent=176230 recv=4658522 errors=0
+  t+155s active=155 sent=176695 recv=4660072 errors=0
+  t+156s active=155 sent=177161 recv=4661623 errors=0
+  t+157s active=155 sent=177629 recv=4663176 errors=0
+  t+158s active=155 sent=178241 recv=4664873 errors=0
+  t+159s active=155 sent=178706 recv=4666578 errors=0
+  t+160s active=155 sent=179171 recv=4668128 errors=0
+=== Load result: rooms-200 (sustained-input) ===
+clients: 10000  connections ok/fail: 10000/0
+messages sent/recv: 179171/4668128  bytes sent/recv: 21835646/15070322879
+server errors: 0  unexpected closes: 9844  corrections: 0  malformed rejected: 0
+connect p95: 31239.7ms  handshake p95: 894.8ms  join p95: 897.68ms
+input→snapshot p95: 289.41ms  max snapshot lag: 1335 ticks
+per-room (client view): 50 rooms received data  snapshots=4655708  min clients-receiving/room=187  worst lag=1335 ticks  (weakest: room-50 187 clients)
+server check: FAIL  rooms 50/50  at 200 subscribers: 0/50  tick advancing: 50/50
+Results written to: load/results/rooms-200

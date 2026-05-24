@@ -3,6 +3,7 @@
   "scenarioType": "idle-soak",
   "serverUrl": "http://localhost:5000",
   "joinTokenMode": "ControlPlane",
+  "apiKey": "dev-tenant-a-key",
   "tenantId": "tenant-a",
   "gameId": "demo-game",
   "roomCount": 10,

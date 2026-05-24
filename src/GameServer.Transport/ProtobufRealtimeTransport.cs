@@ -11,11 +11,14 @@ namespace GameServer.Transport;
 /// answered with a typed <see cref="W.ServerError"/> — and forwards only the
 /// platform messages the kernel understands.
 /// </summary>
-public sealed class ProtobufRealtimeTransport : IBidirectionalTransport
+public sealed class ProtobufRealtimeTransport : IBidirectionalTransport, IInboundActivityProbe
 {
     private readonly IRealtimeChannel _channel;
     private readonly RealtimeProtobufCodec _codec;
     private readonly RealtimeEnvelopeMapper _mapper;
+    // Every wire frame this adapter reads — including pings it answers and frames it drops, which
+    // never reach the server loop. The server reads this to tell an active connection from a zombie.
+    private long _inboundFrameCount;
 
     public ProtobufRealtimeTransport(
         IRealtimeChannel channel,
@@ -31,6 +34,8 @@ public sealed class ProtobufRealtimeTransport : IBidirectionalTransport
 
     public ConnectionId ConnectionId { get; }
 
+    public long InboundFrameCount => Interlocked.Read(ref _inboundFrameCount);
+
     public async Task SendAsync(MessageEnvelope message, CancellationToken cancellationToken = default)
     {
         var wire = _mapper.MapServer(message);
@@ -43,11 +48,18 @@ public sealed class ProtobufRealtimeTransport : IBidirectionalTransport
         {
             var frame = await _channel.ReceiveAsync(cancellationToken).ConfigureAwait(false);
 
+            if (frame.Kind == RealtimeFrameKind.Closed)
+            {
+                return null;
+            }
+
+            // Any non-close frame is client activity, even one we handle at the edge and never
+            // forward (a ping we answer, a frame we drop) — count it before dispatch so the
+            // server's liveness check can see a busy connection that produces no kernel messages.
+            Interlocked.Increment(ref _inboundFrameCount);
+
             switch (frame.Kind)
             {
-                case RealtimeFrameKind.Closed:
-                    return null;
-
                 case RealtimeFrameKind.Text:
                     await SendErrorAsync(
                         W.ErrorCode.TextFrameNotAllowed,

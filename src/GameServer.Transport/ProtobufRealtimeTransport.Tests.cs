@@ -41,6 +41,50 @@ public sealed class ProtobufRealtimeTransportTests
         },
     };
 
+    private static Wire.RealtimeEnvelope Ping(string player) => new()
+    {
+        ProtocolVersion = Wire.ProtocolVersion.V1,
+        MessageType = Wire.MessageType.ClientPing,
+        TenantId = "tenant-a",
+        GameId = "demo-game",
+        PlayerId = player,
+        TraceId = "t-ping",
+        ClientPing = new Wire.ClientPing { ClientTick = 1, Nonce = "n1" },
+    };
+
+    private static Wire.RealtimeEnvelope Command(string player) => new()
+    {
+        ProtocolVersion = Wire.ProtocolVersion.V1,
+        MessageType = Wire.MessageType.ClientCommand,
+        TenantId = "tenant-a",
+        GameId = "demo-game",
+        RoomId = "room-1",
+        PlayerId = player,
+        TraceId = "t-cmd",
+        ClientCommand = new Wire.ClientCommand { Command = "MoveRight" },
+    };
+
+    [Fact]
+    public async Task EdgeHandledFrames_AreCountedAsInboundActivity()
+    {
+        // A ping is answered at the edge (pong) and never forwarded; a command follows and is
+        // forwarded. Both must count toward InboundFrameCount so the server can see that a client
+        // sending only pings is alive — otherwise it would be wrongly reaped as idle.
+        var channel = new FakeRealtimeChannel();
+        var transport = Transport(channel, "c1");
+        channel.EnqueueBinary(Codec.Encode(Ping("alice")));
+        channel.EnqueueBinary(Codec.Encode(Command("alice")));
+        channel.CompleteInbound();
+
+        var message = await transport.ReceiveAsync(CancellationToken.None);
+
+        Assert.NotNull(message);
+        Assert.Equal(MessageType.ClientCommand, message!.MessageType);     // the command was forwarded
+        Assert.Equal(2, transport.InboundFrameCount);                       // ping + command both counted
+        Assert.Contains(channel.Sent.Select(Codec.Decode),                  // ping was answered at the edge
+            m => m.PayloadCase == Wire.RealtimeEnvelope.PayloadOneofCase.ServerPong);
+    }
+
     [Fact]
     public async Task WebSocketEndpoint_RejectsTextFrame()
     {

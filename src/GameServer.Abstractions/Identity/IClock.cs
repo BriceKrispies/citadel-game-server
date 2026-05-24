@@ -10,9 +10,3 @@ public interface IClock
 {
     DateTimeOffset UtcNow { get; }
 }
-
-/// <summary>Production clock backed by the system wall clock.</summary>
-public sealed class SystemClock : IClock
-{
-    public DateTimeOffset UtcNow => DateTimeOffset.UtcNow;
-}

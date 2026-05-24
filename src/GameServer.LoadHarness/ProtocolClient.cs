@@ -42,13 +42,18 @@ public sealed class ProtocolClient
         return _codec.Encode(env);
     }
 
-    public byte[] InputFrame(string room, long clientTick, long sequence, string command = "MoveRight")
+    /// <summary>
+    /// A gameplay command — the message the platform actually forwards to the room and folds
+    /// into the authoritative simulation. (Note: <c>ClientInputFrame</c> is currently discarded
+    /// by the server mapper and does not even count as connection liveness, so it must NOT be
+    /// used to drive load — see RealtimeEnvelopeMapper.) The client tick rides along for the
+    /// command→snapshot latency measurement.
+    /// </summary>
+    public byte[] Command(string room, long clientTick, long sequence, string command)
     {
-        var env = Base(MessageType.ClientInputFrame, room, sequence);
+        var env = Base(MessageType.ClientCommand, room, sequence);
         env.ClientTick = (ulong)clientTick;
-        var frame = new ClientInputFrame { ClientTick = (ulong)clientTick };
-        frame.Commands.Add(new InputCommand { Command = command });
-        env.ClientInputFrame = frame;
+        env.ClientCommand = new ClientCommand { Command = command };
         return _codec.Encode(env);
     }
 

@@ -1,6 +1,9 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
+  <!-- Service adapters (rank 1): the concrete tenant resolver, compute budget, and rate
+       limiter that implement the rank-0 Abstractions ports. Wired only at composition roots. -->
   <ItemGroup>
+    <ProjectReference Include="..\GameServer.Abstractions\GameServer.Abstractions.csproj" />
     <ProjectReference Include="..\GameServer.Protocol\GameServer.Protocol.csproj" />
   </ItemGroup>
 

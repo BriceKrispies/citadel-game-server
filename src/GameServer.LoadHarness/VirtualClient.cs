@@ -99,12 +99,12 @@ public sealed class VirtualClient
         await SendAsync(_protocol.JoinRoom(Room, NextSequence()), cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task<long> SendInputFrameAsync(CancellationToken cancellationToken)
+    public async Task<long> SendCommandAsync(CancellationToken cancellationToken)
     {
         var sequence = NextSequence();
         var tick = Interlocked.Increment(ref _clientTick);
         _lastInputTimestamp = _clock.GetTimestamp();
-        await SendAsync(_protocol.InputFrame(Room, tick, sequence), cancellationToken).ConfigureAwait(false);
+        await SendAsync(_protocol.Command(Room, tick, sequence, _config.Command), cancellationToken).ConfigureAwait(false);
         return sequence;
     }
 
@@ -211,7 +211,7 @@ public sealed class VirtualClient
                 elapsed += delay.TotalSeconds;
             }
 
-            await SendInputFrameAsync(cancellationToken).ConfigureAwait(false);
+            await SendCommandAsync(cancellationToken).ConfigureAwait(false);
             sent++;
 
             if (elapsed >= nextPingAt)
@@ -290,6 +290,8 @@ public sealed class VirtualClient
         if (_awaitingJoinSnapshot)
         {
             _metrics.RecordJoinLatency(_clock.GetElapsed(_joinStart));
+            // First snapshot after join: this client is now confirmed receiving room updates.
+            _metrics.RecordRoomClientReceiving(Room);
             _awaitingJoinSnapshot = false;
         }
 
@@ -304,7 +306,9 @@ public sealed class VirtualClient
             _lastServerTick = serverTick;
         }
 
-        _metrics.RecordSnapshotLag((long)(_lastServerTick - _lastAckedServerTick));
+        var lag = (long)(_lastServerTick - _lastAckedServerTick);
+        _metrics.RecordSnapshotLag(lag);
+        _metrics.RecordRoomSnapshot(Room, serverTick, lag);
 
         if (_config.SnapshotAckMode == SnapshotAckMode.EverySnapshot)
         {

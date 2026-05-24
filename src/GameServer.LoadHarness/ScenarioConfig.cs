@@ -49,8 +49,24 @@ public sealed record ScenarioConfig
     /// <summary>Static token used only when <see cref="JoinTokenMode"/> is Static.</summary>
     public string? JoinToken { get; init; }
 
+    /// <summary>
+    /// Control-plane API key, sent as <c>Authorization: Bearer &lt;key&gt;</c> on every
+    /// control-plane call (create-room, mint-token, admin observe). Required in
+    /// <see cref="JoinTokenMode.ControlPlane"/> — the <c>/api/v1</c> group rejects
+    /// unauthenticated callers with 401. The key must be authorized for
+    /// <see cref="TenantId"/> (a per-tenant key is sufficient).
+    /// </summary>
+    public string? ApiKey { get; init; }
+
     public string TenantId { get; init; } = "tenant-a";
     public string GameId { get; init; } = "demo-game";
+
+    /// <summary>
+    /// The gameplay command each client sends as its load. Must be one the room's game
+    /// accepts, or the server answers every send with a typed <c>ServerError</c>. Defaults
+    /// to MoveRightGame's only command; grid-walk uses "Up"/"Down"/"Left"/"Right".
+    /// </summary>
+    public string Command { get; init; } = "MoveRight";
 
     public int RoomCount { get; init; } = 1;
     public int ClientsPerRoom { get; init; } = 1;
@@ -58,6 +74,14 @@ public sealed record ScenarioConfig
 
     /// <summary>Seconds over which connections are opened.</summary>
     public double RampUpDuration { get; init; } = 1;
+
+    /// <summary>
+    /// How many client setups (join-token mint + connect + handshake) may be in flight at
+    /// once during ramp. A client's token request is independent of every other's, so the
+    /// ramp need not serialize on control-plane latency; this caps the concurrency so the
+    /// ramp stays a gentle, paced open rather than a connect storm.
+    /// </summary>
+    public int MaxConcurrentStartups { get; init; } = 256;
 
     /// <summary>Seconds of steady-state load after ramp-up.</summary>
     public double SteadyStateDuration { get; init; } = 10;

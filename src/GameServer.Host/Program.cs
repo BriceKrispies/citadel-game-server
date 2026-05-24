@@ -45,6 +45,14 @@ builder.Services.AddSingleton<ISnapshotStore<RoomKey, RoomSnapshot>>(_ => new In
 builder.Services.AddSingleton<IEventLog<RoomKey, RoomEvent>>(_ => new InMemoryEventLog<RoomKey, RoomEvent>(e => e.Tick));
 builder.Services.AddSingleton<ISessionRouter>(_ => new InMemorySessionRouter(
     (roomId, gameId) => new GameRoom(roomId, GameFor(gameId), new LogicalSimulationClock(), new SeededRandomSource())));
+// Admission ceilings are enforced at the edge so a burst sheds cleanly instead of driving the
+// process over capacity. Configurable (Realtime:*) with finite defaults sized for this node;
+// never unbounded in a deployed host.
+var admissionPolicy = new AdmissionPolicy(
+    MaxConnections: builder.Configuration.GetValue("Realtime:MaxConnections", 100_000),
+    MaxConnectionsPerTenant: builder.Configuration.GetValue("Realtime:MaxConnectionsPerTenant", 25_000),
+    MaxRooms: builder.Configuration.GetValue("Realtime:MaxRooms", 50_000),
+    MaxRoomsPerTenant: builder.Configuration.GetValue("Realtime:MaxRoomsPerTenant", 10_000));
 // Per-game replication policy comes from the control-plane catalog (registered below).
 builder.Services.AddSingleton<RealtimeServer>(sp => new RealtimeServer(
     sp.GetRequiredService<ITenantResolver>(),
@@ -55,7 +63,7 @@ builder.Services.AddSingleton<RealtimeServer>(sp => new RealtimeServer(
     gameId => sp.GetRequiredService<InMemoryGameCatalog>().GetPolicy(gameId.Value),
     // Reap empty rooms so memory tracks live rooms, not every room ever joined.
     RoomLifecycle.Reap,
-    admission: null,
+    admission: admissionPolicy,
     // Keep a trailing window of room events; older events are covered by the saved
     // snapshot and compacted away, so the event log cannot grow without bound.
     eventLogRetentionTicks: 256));

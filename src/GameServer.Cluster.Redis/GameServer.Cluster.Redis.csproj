@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Distributed backend adapter (rank 3). Implements the rank-2 Routing ports
+       (IRoomDirectory / IRoomPlacement) over Redis. Strict adjacency: references only
+       Routing (rank 2) and the universal kernel (rank 0: Protocol). Must NOT reference
+       Transport (the other rank-3 ring). Wired only at composition roots (the Host). -->
+  <ItemGroup>
+    <ProjectReference Include="..\GameServer.Protocol\GameServer.Protocol.csproj" />
+    <ProjectReference Include="..\GameServer.Routing\GameServer.Routing.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="StackExchange.Redis" Version="2.8.16" />
+  </ItemGroup>
+
+</Project>

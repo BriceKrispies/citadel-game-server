@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    The universal shared kernel of PORTS (rank 0). Every other ring is allowed to depend
+    on this assembly; it depends only on the other kernel assemblies. It holds pure,
+    infrastructure-free contracts — interfaces and the immutable value/DTO types those
+    contracts expose — with no concrete implementations. Adapters that implement these
+    ports live in their own (rank 1) service projects and are wired only at composition
+    roots. The CITADEL0002 analyzer enforces this direction.
+  -->
+  <ItemGroup>
+    <ProjectReference Include="..\GameServer.Protocol\GameServer.Protocol.csproj" />
+    <ProjectReference Include="..\GameServer.Replication\GameServer.Replication.csproj" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+</Project>

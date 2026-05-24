@@ -7,7 +7,10 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <!-- Thin host: it wires and adapts the existing kernel; it owns no game logic. -->
+    <!-- Thin host / composition root: it wires and adapts the existing kernel; it owns no
+         game logic. As a composition root it is exempt from the layering rule and may
+         reference every ring to wire concrete implementations to their kernel ports. -->
+    <ProjectReference Include="..\GameServer.Abstractions\GameServer.Abstractions.csproj" />
     <ProjectReference Include="..\GameServer.Protocol\GameServer.Protocol.csproj" />
     <ProjectReference Include="..\GameServer.Identity\GameServer.Identity.csproj" />
     <ProjectReference Include="..\GameServer.Transport\GameServer.Transport.csproj" />

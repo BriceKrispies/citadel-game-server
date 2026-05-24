@@ -26,17 +26,12 @@ public enum DegradationLevel
 /// <summary>
 /// Turns runtime health signals into an explicit, ordered degradation decision so the server
 /// degrades gracefully instead of failing at a cliff. Today the server measures
-/// <c>missed_ticks</c> and <c>tick_duration_ms</c> but nothing acts on them: admission is
-/// binary (admit until a hard ceiling, then hard-reject), and there is no mechanism to trade
-/// optional work for tick headroom under sustained overload. This controller closes that
-/// observe→act loop: it consumes the health signals and escalates/de-escalates a
-/// <see cref="DegradationLevel"/> with hysteresis.
+/// <c>missed_ticks</c> and <c>tick_duration_ms</c> but nothing acts on them: admission is binary
+/// (admit until a hard ceiling, then hard-reject), and there is no mechanism to trade optional
+/// work for tick headroom under sustained overload. This controller closes that observe→act loop:
+/// it consumes the health signals and escalates/de-escalates a <see cref="DegradationLevel"/> with
+/// hysteresis.
 /// </summary>
-/// <remarks>
-/// RED-phase seam: the contract exists so the degradation behavior can be pinned by a test
-/// (<c>DegradationLadderScenario</c>); the laddering logic and its wiring into the tick driver
-/// and admission path are not built yet.
-/// </remarks>
 public interface IDegradationController
 {
     /// <summary>The current degradation level (what the data plane should currently shed).</summary>
@@ -50,11 +45,16 @@ public interface IDegradationController
     DegradationLevel Observe(double missedTickRate, double tickP95Ms);
 }
 
-/// <summary>Threshold-laddered degradation controller driven by missed-tick rate and tick p95.</summary>
+/// <summary>
+/// Threshold-laddered degradation controller driven by missed-tick rate and tick p95 (measured
+/// against the tick budget). Escalation is immediate so the server reacts to overload at once;
+/// recovery de-escalates one level at a time so it does not flap between levels on noisy signals.
+/// </summary>
 public sealed class LadderDegradationController : IDegradationController
 {
-    private const string NotBuilt =
-        "LadderDegradationController is a RED-phase seam: the degradation ladder is not implemented yet.";
+    private readonly double _tickBudgetMs;
+    private readonly object _lock = new();
+    private DegradationLevel _current = DegradationLevel.Normal;
 
     /// <param name="tickBudgetMs">The per-tick budget; p95 beyond this is the overload signal.</param>
     public LadderDegradationController(double tickBudgetMs)
@@ -67,10 +67,56 @@ public sealed class LadderDegradationController : IDegradationController
         _tickBudgetMs = tickBudgetMs;
     }
 
-    private readonly double _tickBudgetMs;
+    public DegradationLevel Current
+    {
+        get { lock (_lock) { return _current; } }
+    }
 
-    public DegradationLevel Current => throw new NotImplementedException(NotBuilt);
+    public DegradationLevel Observe(double missedTickRate, double tickP95Ms)
+    {
+        var target = TargetFor(missedTickRate, tickP95Ms);
+        lock (_lock)
+        {
+            if (target > _current)
+            {
+                // Escalate straight to the demanded level — overload needs an immediate response.
+                _current = target;
+            }
+            else if (target < _current)
+            {
+                // Recover gently: step down one level at a time to avoid flapping.
+                _current = (DegradationLevel)((int)_current - 1);
+            }
 
-    public DegradationLevel Observe(double missedTickRate, double tickP95Ms) =>
-        throw new NotImplementedException(NotBuilt);
+            return _current;
+        }
+    }
+
+    /// <summary>The level the current signals demand, before hysteresis is applied.</summary>
+    private DegradationLevel TargetFor(double missedTickRate, double tickP95Ms)
+    {
+        // Approaching the budget (or missing the occasional tick) -> start shedding the cheapest,
+        // most optional work first; blowing well past it -> climb toward refusing new load.
+        if (missedTickRate > 0.75 || tickP95Ms > _tickBudgetMs * 2.0)
+        {
+            return DegradationLevel.RejectNewConnections;
+        }
+
+        if (missedTickRate > 0.5 || tickP95Ms > _tickBudgetMs * 1.5)
+        {
+            return DegradationLevel.RejectNewRooms;
+        }
+
+        if (missedTickRate > 0.25 || tickP95Ms > _tickBudgetMs)
+        {
+            return DegradationLevel.ShedTelemetry;
+        }
+
+        if (missedTickRate > 0.05 || tickP95Ms > _tickBudgetMs * 0.75)
+        {
+            return DegradationLevel.ReduceSpectatorSnapshots;
+        }
+
+        return DegradationLevel.Normal;
+    }
 }

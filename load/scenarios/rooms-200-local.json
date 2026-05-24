@@ -1,0 +1,21 @@
+{
+  "name": "rooms-200-local",
+  "scenarioType": "sustained-input",
+  "serverUrl": "http://localhost:5000",
+  "joinTokenMode": "ControlPlane",
+  "apiKey": "dev-tenant-a-key",
+  "tenantId": "tenant-a",
+  "gameId": "demo-game",
+  "roomCount": 10,
+  "clientsPerRoom": 200,
+  "totalClients": 2000,
+  "rampUpDuration": 30,
+  "steadyStateDuration": 45,
+  "inputRatePerClientPerSecond": 3,
+  "snapshotAckMode": "EverySnapshot",
+  "pingInterval": 10,
+  "reconnectMode": "None",
+  "malformedClientPercent": 0,
+  "slowReceiverPercent": 0,
+  "outputDirectory": "load/results/rooms-200-local"
+}

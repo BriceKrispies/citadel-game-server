@@ -9,7 +9,10 @@
     <AssemblyName>GameServer.RoomWorkerHost</AssemblyName>
   </PropertyGroup>
 
+  <!-- Composition root for the out-of-process worker: exempt from the layering rule; wires
+       a concrete game (Simulation) into the room host (Transport) over IPC. -->
   <ItemGroup>
+    <ProjectReference Include="..\GameServer.Abstractions\GameServer.Abstractions.csproj" />
     <ProjectReference Include="..\GameServer.Transport\GameServer.Transport.csproj" />
     <ProjectReference Include="..\GameServer.Simulation\GameServer.Simulation.csproj" />
   </ItemGroup>
