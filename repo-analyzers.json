@@ -1,0 +1,17 @@
+{
+  "requiredTestSuffix": ".Tests.cs",
+  "ignoredGeneratedFiles": true,
+  "ignoredFileSuffixes": [
+    ".Tests.cs",
+    ".Test.cs",
+    ".Fakes.cs",
+    ".TestData.cs",
+    ".TestDoubles.cs"
+  ],
+  "ignoredPathGlobs": [
+    "**/bin/**",
+    "**/obj/**",
+    "**/Testing/**",
+    "**/Migrations/**"
+  ]
+}

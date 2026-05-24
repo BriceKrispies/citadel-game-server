@@ -1,0 +1,20 @@
+{
+  "name": "idle-soak",
+  "scenarioType": "idle-soak",
+  "serverUrl": "http://localhost:5000",
+  "joinTokenMode": "ControlPlane",
+  "tenantId": "tenant-a",
+  "gameId": "demo-game",
+  "roomCount": 10,
+  "clientsPerRoom": 10,
+  "totalClients": 100,
+  "rampUpDuration": 10,
+  "steadyStateDuration": 120,
+  "inputRatePerClientPerSecond": 0,
+  "snapshotAckMode": "EverySnapshot",
+  "pingInterval": 10,
+  "reconnectMode": "None",
+  "malformedClientPercent": 0,
+  "slowReceiverPercent": 0,
+  "outputDirectory": "load/results/idle-soak"
+}

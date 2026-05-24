@@ -1,0 +1,20 @@
+{
+  "name": "sustained-input",
+  "scenarioType": "sustained-input",
+  "serverUrl": "http://localhost:5000",
+  "joinTokenMode": "ControlPlane",
+  "tenantId": "tenant-a",
+  "gameId": "demo-game",
+  "roomCount": 10,
+  "clientsPerRoom": 10,
+  "totalClients": 100,
+  "rampUpDuration": 10,
+  "steadyStateDuration": 60,
+  "inputRatePerClientPerSecond": 10,
+  "snapshotAckMode": "EverySnapshot",
+  "pingInterval": 5,
+  "reconnectMode": "None",
+  "malformedClientPercent": 0,
+  "slowReceiverPercent": 0,
+  "outputDirectory": "load/results/sustained-input"
+}

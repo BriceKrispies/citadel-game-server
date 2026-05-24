@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Thin host: it wires and adapts the existing kernel; it owns no game logic. -->
+    <ProjectReference Include="..\GameServer.Protocol\GameServer.Protocol.csproj" />
+    <ProjectReference Include="..\GameServer.Identity\GameServer.Identity.csproj" />
+    <ProjectReference Include="..\GameServer.Transport\GameServer.Transport.csproj" />
+    <ProjectReference Include="..\GameServer.Tenancy\GameServer.Tenancy.csproj" />
+    <ProjectReference Include="..\GameServer.Routing\GameServer.Routing.csproj" />
+    <ProjectReference Include="..\GameServer.Simulation\GameServer.Simulation.csproj" />
+    <ProjectReference Include="..\GameServer.ControlPlane\GameServer.ControlPlane.csproj" />
+    <ProjectReference Include="..\GameServer.Persistence\GameServer.Persistence.csproj" />
+    <ProjectReference Include="..\GameServer.Observability\GameServer.Observability.csproj" />
+  </ItemGroup>
+
+</Project>

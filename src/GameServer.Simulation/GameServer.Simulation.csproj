@@ -1,0 +1,17 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <!-- Simulation depends only on pure, infrastructure-free models: the Protocol
+         identifiers and the Replication entity model (the projection target for a
+         game's state). No persistence, observability, transport, or wall-clock time. -->
+    <ProjectReference Include="..\GameServer.Protocol\GameServer.Protocol.csproj" />
+    <ProjectReference Include="..\GameServer.Replication\GameServer.Replication.csproj" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+</Project>

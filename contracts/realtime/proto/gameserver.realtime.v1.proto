@@ -1,0 +1,243 @@
+syntax = "proto3";
+
+package gameserver.realtime.v1;
+
+option csharp_namespace = "GameServer.Protocol.Realtime.V1";
+
+// =============================================================================
+// Citadel realtime protocol — canonical binary wire contract.
+//
+// This .proto is the single source of truth for the realtime gameplay protocol.
+// Browser game clients implement against it. WebSocket frames are BINARY protobuf;
+// JSON exists only as a dev/debug codec, never as the primary contract.
+//
+// COMPATIBILITY (see contracts/realtime/COMPATIBILITY.md):
+//   * field numbers MUST NEVER be reused or renumbered
+//   * prefer additive fields; breaking changes require a new major version (vN)
+//   * unknown game payloads must fail explicitly (ERROR_CODE_UNKNOWN_GAME_MESSAGE)
+// =============================================================================
+
+// Negotiated protocol version. The server advertises which versions it supports.
+enum ProtocolVersion {
+  PROTOCOL_VERSION_UNSPECIFIED = 0;
+  PROTOCOL_VERSION_V1 = 1;
+}
+
+// Logical channels multiplexed over a single physical WebSocket connection.
+enum LogicalChannel {
+  LOGICAL_CHANNEL_UNSPECIFIED = 0;
+  LOGICAL_CHANNEL_GAMEPLAY = 1;
+  LOGICAL_CHANNEL_PRESENCE = 2;
+  LOGICAL_CHANNEL_CHAT = 3;
+  LOGICAL_CHANNEL_SPECTATOR = 4;
+  LOGICAL_CHANNEL_ADMIN = 5;
+  LOGICAL_CHANNEL_TELEMETRY = 6;
+}
+
+// Discriminator for the wire message family. Redundant with the envelope oneof,
+// but carried explicitly so logs/telemetry need not inspect the oneof.
+enum MessageType {
+  MESSAGE_TYPE_UNSPECIFIED = 0;
+  MESSAGE_TYPE_CLIENT_HELLO = 1;
+  MESSAGE_TYPE_SERVER_WELCOME = 2;
+  MESSAGE_TYPE_CLIENT_JOIN_ROOM = 3;
+  MESSAGE_TYPE_SERVER_ROOM_JOINED = 4;
+  MESSAGE_TYPE_CLIENT_INPUT_FRAME = 5;
+  MESSAGE_TYPE_CLIENT_COMMAND = 6;
+  MESSAGE_TYPE_CLIENT_ACK = 7;
+  MESSAGE_TYPE_CLIENT_PING = 8;
+  MESSAGE_TYPE_SERVER_SNAPSHOT = 9;
+  MESSAGE_TYPE_SERVER_DELTA = 10;
+  MESSAGE_TYPE_SERVER_CORRECTION = 11;
+  MESSAGE_TYPE_SERVER_EVENT = 12;
+  MESSAGE_TYPE_SERVER_PONG = 13;
+  MESSAGE_TYPE_SERVER_ERROR = 14;
+  MESSAGE_TYPE_GAME_MESSAGE = 15;
+}
+
+// Stable error codes. See contracts/realtime/ERRORS.md.
+enum ErrorCode {
+  ERROR_CODE_UNSPECIFIED = 0;
+  ERROR_CODE_UNSUPPORTED_PROTOCOL_VERSION = 1;
+  ERROR_CODE_MALFORMED_FRAME = 2;
+  ERROR_CODE_TEXT_FRAME_NOT_ALLOWED = 3;
+  ERROR_CODE_UNAUTHORIZED = 4;
+  ERROR_CODE_INVALID_JOIN_TOKEN = 5;
+  ERROR_CODE_TENANT_NOT_FOUND = 6;
+  ERROR_CODE_GAME_NOT_FOUND = 7;
+  ERROR_CODE_ROOM_NOT_FOUND = 8;
+  ERROR_CODE_SESSION_NOT_FOUND = 9;
+  ERROR_CODE_PLAYER_NOT_IN_ROOM = 10;
+  ERROR_CODE_SEQUENCE_REJECTED = 11;
+  ERROR_CODE_RATE_LIMITED = 12;
+  ERROR_CODE_BACKPRESSURE_REJECTED = 13;
+  ERROR_CODE_INTERNAL_SERVER_ERROR = 14;
+  // Extension: a game-specific payload referenced an unregistered message type
+  // or schema version. Mandated by COMPATIBILITY.md ("fail explicitly").
+  ERROR_CODE_UNKNOWN_GAME_MESSAGE = 15;
+}
+
+// Stable, machine-readable close reasons.
+enum DisconnectReason {
+  DISCONNECT_REASON_UNSPECIFIED = 0;
+  DISCONNECT_REASON_CLIENT_REQUESTED = 1;
+  DISCONNECT_REASON_PROTOCOL_VIOLATION = 2;
+  DISCONNECT_REASON_UNSUPPORTED_VERSION = 3;
+  DISCONNECT_REASON_TEXT_FRAME = 4;
+  DISCONNECT_REASON_UNAUTHORIZED = 5;
+  DISCONNECT_REASON_IDLE_TIMEOUT = 6;
+  DISCONNECT_REASON_SERVER_SHUTDOWN = 7;
+  DISCONNECT_REASON_RATE_LIMITED = 8;
+  DISCONNECT_REASON_INTERNAL_ERROR = 9;
+}
+
+// The envelope wrapping every realtime message. Identity/correlation fields are
+// carried on the envelope; the message body is the `payload` oneof.
+message RealtimeEnvelope {
+  ProtocolVersion protocol_version = 1;
+  string message_id = 2;
+  MessageType message_type = 3;
+  string tenant_id = 4;
+  string game_id = 5;
+  string room_id = 6;
+  string session_id = 7;
+  string player_id = 8;
+  string connection_id = 9;
+  uint64 sequence = 10;
+  uint64 ack = 11;
+  uint64 client_tick = 12;
+  uint64 server_tick = 13;
+  string trace_id = 14;
+  LogicalChannel logical_channel = 15;
+
+  // Known platform messages. The set field is authoritative; `message_type`
+  // must agree with it.
+  oneof payload {
+    ClientHello client_hello = 20;
+    ServerWelcome server_welcome = 21;
+    ClientJoinRoom client_join_room = 22;
+    ServerRoomJoined server_room_joined = 23;
+    ClientInputFrame client_input_frame = 24;
+    ClientCommand client_command = 25;
+    ClientAck client_ack = 26;
+    ClientPing client_ping = 27;
+    ServerSnapshot server_snapshot = 28;
+    ServerDelta server_delta = 29;
+    ServerCorrection server_correction = 30;
+    ServerEvent server_event = 31;
+    ServerPong server_pong = 32;
+    ServerError server_error = 33;
+    GameMessage game_message = 34;
+  }
+}
+
+// Safe extension mechanism for game-specific payloads. The platform never
+// interprets `game_payload`; an unregistered type/version fails explicitly.
+message GameMessage {
+  string game_message_type = 1;
+  bytes game_payload = 2;
+  uint32 game_schema_version = 3;
+}
+
+// ---- Client -> Server -------------------------------------------------------
+
+message ClientHello {
+  ProtocolVersion requested_protocol_version = 1;
+  string join_token = 2;
+  string client_name = 3;
+  repeated ProtocolVersion supported_protocol_versions = 4;
+}
+
+message ClientJoinRoom {
+  string room_id = 1;
+}
+
+// A predicted input frame. The server treats it as intent, never as truth.
+message ClientInputFrame {
+  uint64 client_tick = 1;
+  repeated InputCommand commands = 2;
+}
+
+message InputCommand {
+  string command = 1;
+}
+
+message ClientCommand {
+  string command = 1;
+}
+
+message ClientAck {
+  uint64 acked_sequence = 1;
+  uint64 acked_server_tick = 2;
+}
+
+message ClientPing {
+  uint64 client_tick = 1;
+  string nonce = 2;
+}
+
+// ---- Server -> Client -------------------------------------------------------
+
+message ServerWelcome {
+  ProtocolVersion accepted_protocol_version = 1;
+  string session_id = 2;
+  string connection_id = 3;
+  uint64 server_tick = 4;
+}
+
+message ServerRoomJoined {
+  string room_id = 1;
+  string player_id = 2;
+  uint64 server_tick = 3;
+}
+
+message ServerSnapshot {
+  uint64 server_tick = 1;
+  // Legacy typed player view (v1.0). Superseded by `entities`: game state is now
+  // opaque to the platform. Field number kept reserved per COMPATIBILITY.md (never
+  // reused/renumbered); no longer populated by the server.
+  repeated PlayerState players = 2;
+  // Game-defined entities. The platform never interprets `payload`; the client decodes
+  // it per its game's schema.
+  repeated EntityState entities = 3;
+}
+
+message PlayerState {
+  string player_id = 1;
+  int32 x = 2;
+}
+
+message EntityState {
+  string entity_id = 1;
+  bytes payload = 2;
+}
+
+message ServerDelta {
+  uint64 from_server_tick = 1;
+  uint64 to_server_tick = 2;
+  repeated PlayerState changed = 3;
+}
+
+message ServerCorrection {
+  uint64 server_tick = 1;
+  PlayerState authoritative = 2;
+  uint64 acked_client_tick = 3;
+}
+
+message ServerEvent {
+  string event_type = 1;
+  bytes payload = 2;
+}
+
+message ServerPong {
+  uint64 client_tick = 1;
+  uint64 server_tick = 2;
+  string nonce = 3;
+}
+
+message ServerError {
+  ErrorCode code = 1;
+  string message = 2;
+  bool fatal = 3;
+  DisconnectReason disconnect_reason = 4;
+}

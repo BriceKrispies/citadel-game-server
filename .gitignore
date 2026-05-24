@@ -1,0 +1,10 @@
+bin/
+obj/
+*.user
+.vs/
+[Tt]est[Rr]esults/
+artifacts/
+StrykerOutput/
+stryker-*.log
+host.log
+load/results/

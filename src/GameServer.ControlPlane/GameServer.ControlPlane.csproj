@@ -1,0 +1,16 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\GameServer.Tenancy\GameServer.Tenancy.csproj" />
+    <ProjectReference Include="..\GameServer.Protocol\GameServer.Protocol.csproj" />
+    <ProjectReference Include="..\GameServer.Replication\GameServer.Replication.csproj" />
+    <ProjectReference Include="..\GameServer.Identity\GameServer.Identity.csproj" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+</Project>

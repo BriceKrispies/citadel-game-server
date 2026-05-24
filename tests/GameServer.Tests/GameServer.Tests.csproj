@@ -1,0 +1,55 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="coverlet.collector" Version="6.0.4" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+  </ItemGroup>
+
+  <!--
+    Co-located tests live physically beside the production code under src/, but they
+    compile into THIS test assembly (the production projects exclude them via
+    src/Directory.Build.targets). Pull in every test-only file by convention.
+  -->
+  <PropertyGroup>
+    <SrcRoot>$(MSBuildThisFileDirectory)..\..\src</SrcRoot>
+    <CoLocatedExclude>$(SrcRoot)\**\bin\**\*.cs;$(SrcRoot)\**\obj\**\*.cs</CoLocatedExclude>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="$(SrcRoot)\**\*.Tests.cs" Exclude="$(CoLocatedExclude)" />
+    <Compile Include="$(SrcRoot)\**\*.Test.cs" Exclude="$(CoLocatedExclude)" />
+    <Compile Include="$(SrcRoot)\**\*.Fakes.cs" Exclude="$(CoLocatedExclude)" />
+    <Compile Include="$(SrcRoot)\**\*.TestData.cs" Exclude="$(CoLocatedExclude)" />
+    <Compile Include="$(SrcRoot)\**\*.TestDoubles.cs" Exclude="$(CoLocatedExclude)" />
+    <Compile Include="$(SrcRoot)\**\Testing\**\*.cs" Exclude="$(CoLocatedExclude)" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\GameServer.Protocol\GameServer.Protocol.csproj" />
+    <ProjectReference Include="..\..\src\GameServer.Transport\GameServer.Transport.csproj" />
+    <ProjectReference Include="..\..\src\GameServer.Tenancy\GameServer.Tenancy.csproj" />
+    <ProjectReference Include="..\..\src\GameServer.Routing\GameServer.Routing.csproj" />
+    <ProjectReference Include="..\..\src\GameServer.Simulation\GameServer.Simulation.csproj" />
+    <ProjectReference Include="..\..\src\GameServer.Persistence\GameServer.Persistence.csproj" />
+    <ProjectReference Include="..\..\src\GameServer.Observability\GameServer.Observability.csproj" />
+    <ProjectReference Include="..\..\src\GameServer.ControlPlane\GameServer.ControlPlane.csproj" />
+    <ProjectReference Include="..\..\src\GameServer.Admin\GameServer.Admin.csproj" />
+    <ProjectReference Include="..\..\src\GameServer.LoadHarness\GameServer.LoadHarness.csproj" />
+    <ProjectReference Include="..\..\src\GameServer.Replication\GameServer.Replication.csproj" />
+    <ProjectReference Include="..\..\src\GameServer.Identity\GameServer.Identity.csproj" />
+  </ItemGroup>
+
+</Project>

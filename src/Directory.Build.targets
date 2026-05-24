@@ -1,0 +1,48 @@
+<Project>
+
+  <!--
+    Production-only build rules for everything under src/.
+
+    Tests are physically co-located beside the code they test (e.g. GameRoom.cs and
+    GameRoom.Tests.cs in the same folder), but test-only files must NEVER compile
+    into a production assembly. This file removes them from the production
+    compilation. The matching test project (tests/GameServer.Tests) includes them
+    instead, so they compile into the test assembly only.
+
+    This lives in Directory.Build.targets (not .props) on purpose: it must run
+    AFTER the SDK adds its default '**/*.cs' Compile items, otherwise there would be
+    nothing to remove yet.
+  -->
+  <ItemGroup>
+    <Compile Remove="**\*.Tests.cs" />
+    <Compile Remove="**\*.Test.cs" />
+    <Compile Remove="**\*.Fakes.cs" />
+    <Compile Remove="**\*.TestData.cs" />
+    <Compile Remove="**\*.TestDoubles.cs" />
+    <Compile Remove="**\Testing\**\*.cs" />
+  </ItemGroup>
+
+  <!--
+    Wire the repo's custom Roslyn analyzer (CITADEL0001: production files must have a
+    co-located test) into every production project. The analyzer reads its ignore
+    config from repo-analyzers.json and discovers existing test files via AdditionalFiles
+    (the co-located *.Tests.cs are excluded from compilation above, so the analyzer would
+    not otherwise see them).
+  -->
+  <ItemGroup>
+    <ProjectReference Include="$(MSBuildThisFileDirectory)..\tools\RepoAnalyzers\Citadel.RepoAnalyzers\Citadel.RepoAnalyzers.csproj"
+                      OutputItemType="Analyzer"
+                      ReferenceOutputAssembly="false" />
+
+    <AdditionalFiles Include="$(MSBuildThisFileDirectory)..\repo-analyzers.json" Link="repo-analyzers.json" />
+    <AdditionalFiles Include="**\*.Tests.cs" Exclude="**\bin\**;**\obj\**" />
+    <AdditionalFiles Include="**\*.Test.cs" Exclude="**\bin\**;**\obj\**" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <!-- CITADEL0001 is informational: a missing co-located test is a warning, never a
+         build break, so the convention can be adopted incrementally. -->
+    <WarningsNotAsErrors>$(WarningsNotAsErrors);CITADEL0001</WarningsNotAsErrors>
+  </PropertyGroup>
+
+</Project>

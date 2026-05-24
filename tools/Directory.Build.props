@@ -1,0 +1,16 @@
+<Project>
+
+  <!--
+    Tooling under tools/ is intentionally isolated from the strict src/tests build
+    settings (it does NOT import the repo-root Directory.Build.props). Roslyn
+    analyzers must target netstandard2.0 and tolerate analyzer-design (RS####)
+    warnings, so warnings are not errors here.
+  -->
+  <PropertyGroup>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+  </PropertyGroup>
+
+</Project>

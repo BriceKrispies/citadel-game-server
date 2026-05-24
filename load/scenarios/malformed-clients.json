@@ -1,0 +1,20 @@
+{
+  "name": "malformed-clients",
+  "scenarioType": "malformed-clients",
+  "serverUrl": "http://localhost:5000",
+  "joinTokenMode": "ControlPlane",
+  "tenantId": "tenant-a",
+  "gameId": "demo-game",
+  "roomCount": 10,
+  "clientsPerRoom": 10,
+  "totalClients": 100,
+  "rampUpDuration": 10,
+  "steadyStateDuration": 30,
+  "inputRatePerClientPerSecond": 2,
+  "snapshotAckMode": "EverySnapshot",
+  "pingInterval": 5,
+  "reconnectMode": "None",
+  "malformedClientPercent": 20,
+  "slowReceiverPercent": 0,
+  "outputDirectory": "load/results/malformed-clients"
+}

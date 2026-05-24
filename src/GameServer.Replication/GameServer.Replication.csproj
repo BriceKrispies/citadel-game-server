@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Pure replication engine: generic, game-agnostic, infrastructure-free. It reads an
+    authoritative entity snapshot and produces per-viewer payloads (batched, delta-
+    compressed, interest-filtered, budget-limited). No dependency on Simulation,
+    Transport, or Protocol — adapters map between those and this model elsewhere.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+</Project>

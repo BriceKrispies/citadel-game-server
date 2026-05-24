@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Edge identity primitives: a wall-clock seam and signed, scoped, short-lived join
+    tokens. Dependency-free on purpose so both the control plane (which issues tokens)
+    and the realtime transport edge (which verifies them) can reference it without
+    coupling to each other, and so the simulation kernel never gains an auth dependency.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+</Project>

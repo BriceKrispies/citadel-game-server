@@ -1,0 +1,20 @@
+{
+  "name": "reconnect-storm",
+  "scenarioType": "reconnect-storm",
+  "serverUrl": "http://localhost:5000",
+  "joinTokenMode": "ControlPlane",
+  "tenantId": "tenant-a",
+  "gameId": "demo-game",
+  "roomCount": 10,
+  "clientsPerRoom": 10,
+  "totalClients": 100,
+  "rampUpDuration": 5,
+  "steadyStateDuration": 60,
+  "inputRatePerClientPerSecond": 2,
+  "snapshotAckMode": "EverySnapshot",
+  "pingInterval": 5,
+  "reconnectMode": "Periodic",
+  "malformedClientPercent": 0,
+  "slowReceiverPercent": 0,
+  "outputDirectory": "load/results/reconnect-storm"
+}

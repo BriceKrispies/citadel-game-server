@@ -1,0 +1,17 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\GameServer.Protocol\GameServer.Protocol.csproj" />
+    <ProjectReference Include="..\GameServer.Tenancy\GameServer.Tenancy.csproj" />
+    <ProjectReference Include="..\GameServer.Simulation\GameServer.Simulation.csproj" />
+    <ProjectReference Include="..\GameServer.Persistence\GameServer.Persistence.csproj" />
+    <ProjectReference Include="..\GameServer.Observability\GameServer.Observability.csproj" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+</Project>

@@ -1,0 +1,26 @@
+{
+  "stryker-config": {
+    "test-projects": [
+      "tests/GameServer.Tests/GameServer.Tests.csproj"
+    ],
+    "mutate": [
+      "!**/*.Tests.cs",
+      "!**/*.Test.cs",
+      "!**/*.Fakes.cs",
+      "!**/*.TestData.cs",
+      "!**/*.TestDoubles.cs",
+      "!**/Testing/**/*.cs"
+    ],
+    "reporters": [
+      "progress",
+      "html"
+    ],
+    "thresholds": {
+      "high": 80,
+      "low": 60,
+      "break": 0
+    },
+    "additional-timeout": 30000,
+    "mutation-level": "Standard"
+  }
+}

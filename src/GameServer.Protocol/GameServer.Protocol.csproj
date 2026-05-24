@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Google.Protobuf" Version="3.22.5" />
+    <PackageReference Include="Grpc.Tools" Version="2.54.0" PrivateAssets="all" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The canonical realtime contract is compiled into this project. The .proto in
+         contracts/ is the single source of truth (messages only, no gRPC services). -->
+    <Protobuf Include="..\..\contracts\realtime\proto\gameserver.realtime.v1.proto"
+              GrpcServices="None"
+              ProtoRoot="..\..\contracts\realtime\proto"
+              Link="Realtime\gameserver.realtime.v1.proto" />
+  </ItemGroup>
+
+</Project>
