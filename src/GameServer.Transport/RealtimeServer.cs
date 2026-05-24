@@ -36,10 +36,17 @@ public enum RoomLifecycle
 /// sets real ceilings. Rejections are explicit (the client gets a <c>ServerError</c>) and
 /// counted (<c>admission_rejected</c> with a reason), never silent.
 /// </summary>
+/// <remarks>
+/// <see cref="MaxRoomsPerTenant"/> is a RED-phase seam: the property exists so a noisy-neighbor
+/// test (<c>PerTenantRoomCapScenario</c>) can pin the behavior, but the edge does not enforce a
+/// per-tenant room ceiling yet — only the global <see cref="MaxRooms"/> is enforced, which one
+/// tenant can exhaust to starve the others.
+/// </remarks>
 public sealed record AdmissionPolicy(
     int MaxConnections = int.MaxValue,
     int MaxConnectionsPerTenant = int.MaxValue,
-    int MaxRooms = int.MaxValue)
+    int MaxRooms = int.MaxValue,
+    int MaxRoomsPerTenant = int.MaxValue)
 {
     public static readonly AdmissionPolicy Unlimited = new();
 }
@@ -112,6 +119,12 @@ public sealed class RealtimeServer
     {
         get { lock (_admissionLock) { return _connectionCount; } }
     }
+
+    /// <summary>
+    /// The admission policy this server is enforcing. Exposed so operators (and tests) can
+    /// confirm the deployed host actually configured ceilings rather than running unbounded.
+    /// </summary>
+    public AdmissionPolicy Admission => _admission;
 
     /// <summary>
     /// Drives one connection until its client side completes, processing each

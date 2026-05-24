@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <!-- A stable assembly name so the parent can launch it by a known dll path. -->
+    <AssemblyName>GameServer.RoomWorkerHost</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\GameServer.Transport\GameServer.Transport.csproj" />
+    <ProjectReference Include="..\GameServer.Simulation\GameServer.Simulation.csproj" />
+  </ItemGroup>
+
+</Project>

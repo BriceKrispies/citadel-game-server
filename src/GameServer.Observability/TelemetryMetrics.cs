@@ -43,4 +43,8 @@ public static class TelemetryEvents
     public const string WorkerFaulted = "worker_faulted";
     public const string WorkerStopped = "worker_stopped";
     public const string WorkerDrainTimedOut = "worker_drain_timed_out";
+    public const string WorkerProcessStarted = "worker_process_started";
+    public const string WorkerProcessExited = "worker_process_exited";
+    public const string WorkerProcessCrashed = "worker_process_crashed";
+    public const string WorkerProcessKilled = "worker_process_killed";
 }
