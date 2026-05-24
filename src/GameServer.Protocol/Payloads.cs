@@ -21,6 +21,9 @@ public enum ServerErrorCode
     RoomUnavailable,
     MalformedMessage,
     Unauthorized,
+
+    /// <summary>The server is shedding load (e.g. the room command queue is full); retry shortly.</summary>
+    Overloaded,
 }
 
 // ---- Client -> Server -------------------------------------------------------

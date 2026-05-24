@@ -1,4 +1,5 @@
 using GameServer.Protocol;
+using GameServer.Replication;
 using GameServer.Simulation;
 using GameServer.Tenancy;
 using Xunit;
@@ -9,10 +10,11 @@ public sealed class InMemorySessionRouterTests
 {
     private static readonly TenantContext TenantA = new(new TenantId("tenant-a"), "Tenant A");
     private static readonly TenantContext TenantB = new(new TenantId("tenant-b"), "Tenant B");
+    private static readonly GameId Game = new("demo");
 
     // A minimal stand-in room: routing tests care about placement/keying, not simulation.
     private static InMemorySessionRouter NewRouter() =>
-        new(roomId => new StubRoom(roomId));
+        new((roomId, _) => new StubRoom(roomId));
 
     [Fact]
     public void CreateSession_IssuesDeterministicIncrementingIds()
@@ -28,8 +30,8 @@ public sealed class InMemorySessionRouterTests
     {
         var router = NewRouter();
 
-        var first = router.GetOrCreateRoom(TenantA, new RoomId("arena"));
-        var second = router.GetOrCreateRoom(TenantA, new RoomId("arena"));
+        var first = router.GetOrCreateRoom(TenantA, new RoomId("arena"), Game);
+        var second = router.GetOrCreateRoom(TenantA, new RoomId("arena"), Game);
 
         Assert.Same(first, second);
     }
@@ -39,8 +41,8 @@ public sealed class InMemorySessionRouterTests
     {
         var router = NewRouter();
 
-        var roomA = router.GetOrCreateRoom(TenantA, new RoomId("arena"));
-        var roomB = router.GetOrCreateRoom(TenantB, new RoomId("arena"));
+        var roomA = router.GetOrCreateRoom(TenantA, new RoomId("arena"), Game);
+        var roomB = router.GetOrCreateRoom(TenantB, new RoomId("arena"), Game);
 
         Assert.NotSame(roomA, roomB);
     }
@@ -49,7 +51,7 @@ public sealed class InMemorySessionRouterTests
     public void TryGetRoom_FindsPlacedRoom_AndMissesUnplaced()
     {
         var router = NewRouter();
-        router.GetOrCreateRoom(TenantA, new RoomId("arena"));
+        router.GetOrCreateRoom(TenantA, new RoomId("arena"), Game);
 
         Assert.True(router.TryGetRoom(new RoomKey(TenantA.TenantId, new RoomId("arena")), out _));
         Assert.False(router.TryGetRoom(new RoomKey(TenantB.TenantId, new RoomId("arena")), out _));
@@ -61,19 +63,23 @@ public sealed class InMemorySessionRouterTests
 
         public RoomId Id { get; }
 
+        public int QueueDepth => 0;
+
         public void Join(PlayerId player) { }
 
         public bool HasPlayer(PlayerId player) => false;
 
-        public CommandAdmission TryEnqueue(RoomCommand command) => CommandAdmission.Accepted;
+        public CommandAdmission TryEnqueue(PlayerId player, string command, long sequence) => CommandAdmission.Accepted;
 
         public TickResult Tick() =>
-            new(new RoomSnapshot(0, new Dictionary<PlayerId, int>()), Array.Empty<RoomEvent>());
+            new(new RoomSnapshot(0, Array.Empty<byte>()), Array.Empty<RoomEvent>());
 
-        public RoomSnapshot Snapshot() => new(0, new Dictionary<PlayerId, int>());
+        public IReadOnlyList<EntitySnapshot> Project() => Array.Empty<EntitySnapshot>();
+
+        public RoomSnapshot Snapshot() => new(0, Array.Empty<byte>());
 
         public void RestoreFrom(RoomSnapshot snapshot) { }
 
-        public void ApplyRecoveredEvent(RoomEvent recoveredEvent) { }
+        public bool ApplyRecoveredEvent(RoomEvent recoveredEvent) => true;
     }
 }

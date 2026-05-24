@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using GameServer.Observability;
+using GameServer.Transport;
 
 namespace GameServer.Host;
 
@@ -9,7 +10,11 @@ namespace GameServer.Host;
 /// process CPU/memory. The hot path only accumulates counters; this loop is the only
 /// thing that reads and reports, so telemetry never amplifies the realtime load.
 /// </summary>
-public sealed class TelemetryFlushService : BackgroundService
+/// <remarks>
+/// Runs as a supervised worker (see <see cref="WorkerSupervisor"/>): a fault is restarted
+/// and counted rather than taking down the host, and it is cancelled on graceful shutdown.
+/// </remarks>
+public sealed class TelemetryFlushService : ISupervisedWorker
 {
     private static readonly TimeSpan FlushInterval = TimeSpan.FromSeconds(5);
 
@@ -28,13 +33,15 @@ public sealed class TelemetryFlushService : BackgroundService
         _logger = logger;
     }
 
-    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    public string Name => "telemetry-flush";
+
+    public async Task RunAsync(CancellationToken cancellationToken)
     {
         _previousCpu = _process.TotalProcessorTime;
         _previousWall = Stopwatch.GetTimestamp();
         using var timer = new PeriodicTimer(FlushInterval);
 
-        while (await timer.WaitForNextTickAsync(stoppingToken).ConfigureAwait(false))
+        while (await timer.WaitForNextTickAsync(cancellationToken).ConfigureAwait(false))
         {
             Flush();
         }
@@ -50,18 +57,9 @@ public sealed class TelemetryFlushService : BackgroundService
             return;
         }
 
-        double Rate(string metric) => (now.Counter(metric) - _previous.Counter(metric)) / seconds;
-
-        var tickNow = now.Measure(TelemetryMetrics.TickDurationMs);
-        var tickPrev = _previous.Measure(TelemetryMetrics.TickDurationMs);
-        var tickIntervalCount = tickNow.Count - tickPrev.Count;
-        var tickMeanMs = tickIntervalCount > 0 ? (tickNow.Sum - tickPrev.Sum) / tickIntervalCount : 0;
-
-        // Replicated payload volume: entities actually sent per second. This is what
-        // delta/interest/budget reduce (message count can stay flat while this drops).
-        var entitiesNow = now.Measure(TelemetryMetrics.SnapshotEntities);
-        var entitiesPrev = _previous.Measure(TelemetryMetrics.SnapshotEntities);
-        var entitiesPerSecond = (entitiesNow.Sum - entitiesPrev.Sum) / seconds;
+        // Telemetry-derived rates come from the shared interval computation (the same one
+        // the live /sim/telemetry feed uses); only process-level CPU/memory is local here.
+        var rates = TelemetryRates.Between(_previous, now, seconds);
 
         var cpuNow = _process.TotalProcessorTime;
         var cpuPercent = (cpuNow - _previousCpu).TotalSeconds / (seconds * Environment.ProcessorCount) * 100.0;
@@ -69,14 +67,14 @@ public sealed class TelemetryFlushService : BackgroundService
 
         _logger.LogInformation(
             "telemetry | conns_opened={ConnOpened} dropped={Dropped} | msgs out/s={OutRate:0} entities/s={EntRate:0} | snapshots/s={SnapRate:0} | tick ms mean={TickMean:0.0} max={TickMax:0.0} missed={Missed} | cpu={Cpu:0.0}% mem={Mem:0}MB",
-            now.Counter(TelemetryMetrics.ConnectionsOpened),
-            now.EventCount(TelemetryEvents.ConnectionDropped),
-            Rate(TelemetryMetrics.MessagesOut),
-            entitiesPerSecond,
-            Rate(TelemetryMetrics.SnapshotsEmitted),
-            tickMeanMs,
-            tickNow.Max,
-            now.Counter(TelemetryMetrics.MissedTicks),
+            rates.ConnectionsOpened,
+            rates.ConnectionsDropped,
+            rates.MessagesOutPerSecond,
+            rates.EntitiesPerSecond,
+            rates.SnapshotsPerSecond,
+            rates.TickMeanMs,
+            rates.TickMaxMs,
+            rates.MissedTicks,
             cpuPercent,
             memMb);
 

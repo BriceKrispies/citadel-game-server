@@ -95,4 +95,10 @@ public sealed class Replicator
     /// previous connection acknowledged, so the server must re-establish a keyframe.
     /// </summary>
     public void Resubscribe(ViewerId viewer) => _delta.Forget(viewer);
+
+    /// <summary>
+    /// Snapshots sent to a viewer but not yet acknowledged — a read-only lag/health signal
+    /// for observability (0 = caught up; a climbing value means the client has stopped acking).
+    /// </summary>
+    public int PendingSnapshots(ViewerId viewer) => _delta.PendingSnapshotCount(viewer);
 }

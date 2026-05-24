@@ -48,6 +48,36 @@ public sealed class GameRoomTests
     }
 
     [Fact]
+    public void TryEnqueue_BeyondQueueCapacity_ShedsAsOverloaded_ThenAcceptsAfterTickDrains()
+    {
+        var game = new FakeGame();
+        var room = new GameRoom(
+            new RoomId("arena"), game, new FakeSimulationClock(), new DeterministicRandomSource(), maxQueueDepth: 2);
+        room.Join(Player);
+
+        Assert.Equal(CommandAdmission.Accepted, room.TryEnqueue(Player, "Go", 1));
+        Assert.Equal(CommandAdmission.Accepted, room.TryEnqueue(Player, "Go", 2));
+        Assert.Equal(2, room.QueueDepth);
+
+        // A third otherwise-valid command overflows the bounded queue: shed explicitly,
+        // not enqueued, and its sequence is NOT recorded.
+        Assert.Equal(CommandAdmission.RejectedOverloaded, room.TryEnqueue(Player, "Go", 3));
+        Assert.Equal(2, room.QueueDepth);
+
+        // Draining via a tick restores capacity, and the shed sequence is accepted on retry.
+        room.Tick();
+        Assert.Equal(0, room.QueueDepth);
+        Assert.Equal(CommandAdmission.Accepted, room.TryEnqueue(Player, "Go", 3));
+    }
+
+    [Fact]
+    public void Construction_WithNonPositiveQueueDepth_Throws()
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            new GameRoom(new RoomId("arena"), new FakeGame(), new FakeSimulationClock(), new DeterministicRandomSource(), maxQueueDepth: 0));
+    }
+
+    [Fact]
     public void QueuedCommand_IsNotAppliedUntilTick()
     {
         var game = new FakeGame();

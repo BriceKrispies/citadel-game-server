@@ -14,6 +14,12 @@ public interface IGameRoom
 {
     RoomId Id { get; }
 
+    /// <summary>
+    /// Commands currently queued for the next tick. The data plane observes this as a
+    /// backpressure gauge; it rises when clients outrun the tick drain rate.
+    /// </summary>
+    int QueueDepth { get; }
+
     /// <summary>Admits a player to the room's game. Idempotent for an already-joined player.</summary>
     void Join(PlayerId player);
 

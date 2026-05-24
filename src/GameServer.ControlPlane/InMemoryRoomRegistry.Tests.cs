@@ -31,7 +31,7 @@ public sealed class InMemoryRoomRegistryTests
     {
         // Realtime simulation data plane.
         var router = new InMemorySessionRouter(
-            id => new GameRoom(id, new FakeSimulationClock(), new DeterministicRandomSource()));
+            (id, _) => new GameRoom(id, new MoveRightGame(), new FakeSimulationClock(), new DeterministicRandomSource()));
         var snapshots = new InMemorySnapshotStore<RoomKey, RoomSnapshot>();
 
         // Control-plane operations.

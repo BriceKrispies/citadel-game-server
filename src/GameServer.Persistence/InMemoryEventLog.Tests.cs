@@ -32,4 +32,44 @@ public sealed class InMemoryEventLogTests
         Assert.Equal(new[] { "x" }, log.Read("room-1"));
         Assert.Equal(new[] { "y" }, log.Read("room-2"));
     }
+
+    [Fact]
+    public void TruncateThrough_DropsEventsAtOrBelowTheWatermark_KeepingTheSuffix()
+    {
+        // Events carry their own sequence (here the int value); compact through 3.
+        var log = new InMemoryEventLog<string, int>(e => e);
+        foreach (var seq in new[] { 1, 2, 3, 4, 5 })
+        {
+            log.Append("room", seq);
+        }
+
+        log.TruncateThrough("room", throughSequence: 3);
+
+        Assert.Equal(new[] { 4, 5 }, log.Read("room"));
+    }
+
+    [Fact]
+    public void TruncateThrough_BelowEverything_KeepsAll_AboveEverything_KeepsNone()
+    {
+        var log = new InMemoryEventLog<string, int>(e => e);
+        foreach (var seq in new[] { 10, 20, 30 })
+        {
+            log.Append("room", seq);
+        }
+
+        log.TruncateThrough("room", throughSequence: 5);
+        Assert.Equal(new[] { 10, 20, 30 }, log.Read("room"));
+
+        log.TruncateThrough("room", throughSequence: 100);
+        Assert.Empty(log.Read("room"));
+    }
+
+    [Fact]
+    public void TruncateThrough_WithoutSequenceSelector_Throws()
+    {
+        var log = new InMemoryEventLog<string, int>();
+        log.Append("room", 1);
+
+        Assert.Throws<InvalidOperationException>(() => log.TruncateThrough("room", 0));
+    }
 }

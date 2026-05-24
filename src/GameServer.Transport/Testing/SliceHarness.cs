@@ -19,15 +19,21 @@ public sealed class SliceHarness
     public const string DefaultGame = "demo";
 
     public SliceHarness(params string[] tenantIds)
+        : this(GameRoom.DefaultMaxQueueDepth, tenantIds)
+    {
+    }
+
+    /// <summary>Overload for backpressure tests that need a small, easily-saturated command queue.</summary>
+    public SliceHarness(int maxQueueDepth, params string[] tenantIds)
     {
         var tenants = tenantIds.Length == 0 ? new[] { "tenant-a" } : tenantIds;
         Tenants = new InMemoryTenantResolver(
             tenants.Select(t => new TenantContext(new TenantId(t), $"Tenant {t}")));
 
         // Each room gets the game its catalog entry selects, plus its own deterministic
-        // clock + seeded random source.
+        // clock + seeded random source, and the configured command-queue bound.
         Router = new InMemorySessionRouter(
-            (roomId, gameId) => new GameRoom(roomId, GameFor(gameId), new FakeSimulationClock(), new DeterministicRandomSource()));
+            (roomId, gameId) => new GameRoom(roomId, GameFor(gameId), new FakeSimulationClock(), new DeterministicRandomSource(), maxQueueDepth));
 
         Snapshots = new InMemorySnapshotStore<RoomKey, RoomSnapshot>();
         Events = new InMemoryEventLog<RoomKey, RoomEvent>();

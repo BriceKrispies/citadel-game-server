@@ -11,6 +11,40 @@ using GameServer.Tenancy;
 namespace GameServer.Transport;
 
 /// <summary>
+/// What happens to a room when its last connection leaves.
+/// </summary>
+public enum RoomLifecycle
+{
+    /// <summary>
+    /// Keep the room (and its state) after everyone disconnects, ready for a fast rejoin.
+    /// Without an external reaper this leaks: every distinct room ever touched lingers
+    /// forever. This was the original, implicit behavior.
+    /// </summary>
+    Persist,
+
+    /// <summary>
+    /// Tear the room down when the last connection leaves — drop the subscriber set, the
+    /// replicator, and the routed room. A later join recreates it. Bounds memory by live
+    /// rooms rather than by all rooms ever seen.
+    /// </summary>
+    Reap,
+}
+
+/// <summary>
+/// Global admission limits enforced at the edge so a burst cannot drive the server past
+/// its capacity. Defaults are unbounded (no admission control), so this is opt-in; a host
+/// sets real ceilings. Rejections are explicit (the client gets a <c>ServerError</c>) and
+/// counted (<c>admission_rejected</c> with a reason), never silent.
+/// </summary>
+public sealed record AdmissionPolicy(
+    int MaxConnections = int.MaxValue,
+    int MaxConnectionsPerTenant = int.MaxValue,
+    int MaxRooms = int.MaxValue)
+{
+    public static readonly AdmissionPolicy Unlimited = new();
+}
+
+/// <summary>
 /// The realtime data-plane composition for the first vertical slice. It owns the
 /// per-connection protocol handling (hello → welcome → join → command) and the
 /// tick driver that advances a room and fans authoritative snapshots out to that
@@ -30,9 +64,22 @@ public sealed class RealtimeServer
     private readonly IEventLog<RoomKey, RoomEvent> _events;
     private readonly ITelemetrySink _telemetry;
     private readonly Func<GameId, ReplicationPolicy> _policyProvider;
+    private readonly RoomLifecycle _lifecycle;
+    private readonly AdmissionPolicy _admission;
+    // 0 = unbounded (never truncate). >0 keeps that many trailing ticks of events; older
+    // events are covered by the saved snapshot and compacted away.
+    private readonly int _eventLogRetentionTicks;
+
+    // Admission counters. Guarded by _admissionLock (per-connection, not on the hot path).
+    private readonly object _admissionLock = new();
+    private readonly Dictionary<string, int> _connectionsPerTenant = new();
+    private int _connectionCount;
 
     private readonly ConcurrentDictionary<RoomKey, ConcurrentDictionary<ConnectionId, Connection>> _subscribers = new();
     private readonly ConcurrentDictionary<RoomKey, Replicator> _replicators = new();
+    // Serializes a room's join (subscribe + create) against its teardown so the two can
+    // never interleave. Only taken on the Reap path; Persist keeps the original behavior.
+    private readonly ConcurrentDictionary<RoomKey, object> _roomLocks = new();
 
     public RealtimeServer(
         ITenantResolver tenants,
@@ -40,7 +87,10 @@ public sealed class RealtimeServer
         ISnapshotStore<RoomKey, RoomSnapshot> snapshots,
         IEventLog<RoomKey, RoomEvent> events,
         ITelemetrySink telemetry,
-        Func<GameId, ReplicationPolicy>? policyProvider = null)
+        Func<GameId, ReplicationPolicy>? policyProvider = null,
+        RoomLifecycle lifecycle = RoomLifecycle.Persist,
+        AdmissionPolicy? admission = null,
+        int eventLogRetentionTicks = 0)
     {
         _tenants = tenants;
         _router = router;
@@ -50,6 +100,17 @@ public sealed class RealtimeServer
         // Per-game replication policy comes from the control plane; default to the
         // conservative everyone/full policy (which still benefits from batching).
         _policyProvider = policyProvider ?? (_ => ReplicationPolicy.Default);
+        _lifecycle = lifecycle;
+        _admission = admission ?? AdmissionPolicy.Unlimited;
+        _eventLogRetentionTicks = eventLogRetentionTicks;
+    }
+
+    private object RoomLock(RoomKey key) => _roomLocks.GetOrAdd(key, _ => new object());
+
+    /// <summary>Connections currently admitted and open. A capacity gauge for scenarios/ops.</summary>
+    public int ActiveConnectionCount
+    {
+        get { lock (_admissionLock) { return _connectionCount; } }
     }
 
     /// <summary>
@@ -64,18 +125,190 @@ public sealed class RealtimeServer
     public async Task HandleConnectionAsync(IBidirectionalTransport transport, JoinTokenClaims principal, CancellationToken cancellationToken = default)
     {
         var connection = new Connection(transport, principal);
+
+        // Admission control runs before anything else: a connection that cannot be
+        // admitted is told so and dropped, before it can consume a session or a room.
+        if (!TryAdmitConnection(principal.TenantId, out var reason))
+        {
+            _telemetry.Increment(TelemetryMetrics.AdmissionRejected, Tags(("reason", reason)));
+            await SendConnectionError(transport, principal, ServerErrorCode.Overloaded,
+                $"Server is at capacity ({reason}); retry later.", cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
         _telemetry.Increment(TelemetryMetrics.ConnectionsOpened);
         _telemetry.Event(TelemetryEvents.ConnectionOpened, Tags(("connectionId", transport.ConnectionId.Value)));
 
-        while (await transport.ReceiveAsync(cancellationToken).ConfigureAwait(false) is { } inbound)
+        try
         {
-            _telemetry.Increment(TelemetryMetrics.MessagesIn, Tags(("messageType", inbound.MessageType.ToString())));
-            await ProcessAsync(connection, inbound, cancellationToken).ConfigureAwait(false);
+            while (await transport.ReceiveAsync(cancellationToken).ConfigureAwait(false) is { } inbound)
+            {
+                _telemetry.Increment(TelemetryMetrics.MessagesIn, Tags(("messageType", inbound.MessageType.ToString())));
+                await ProcessAsync(connection, inbound, cancellationToken).ConfigureAwait(false);
+            }
+        }
+        finally
+        {
+            // The client side completed (clean close) or the loop faulted: in either case
+            // this connection is gone and must stop counting against the room and the
+            // admission ceilings.
+            OnDisconnect(connection);
+            ReleaseConnection(principal.TenantId);
+        }
+    }
+
+    private bool TryAdmitConnection(string tenant, out string reason)
+    {
+        lock (_admissionLock)
+        {
+            if (_connectionCount >= _admission.MaxConnections)
+            {
+                reason = "max_connections";
+                return false;
+            }
+
+            _connectionsPerTenant.TryGetValue(tenant, out var perTenant);
+            if (perTenant >= _admission.MaxConnectionsPerTenant)
+            {
+                reason = "tenant_quota";
+                return false;
+            }
+
+            _connectionCount++;
+            _connectionsPerTenant[tenant] = perTenant + 1;
+            reason = string.Empty;
+            return true;
+        }
+    }
+
+    private void ReleaseConnection(string tenant)
+    {
+        lock (_admissionLock)
+        {
+            if (_connectionCount > 0)
+            {
+                _connectionCount--;
+            }
+
+            if (_connectionsPerTenant.TryGetValue(tenant, out var perTenant))
+            {
+                if (perTenant <= 1)
+                {
+                    _connectionsPerTenant.Remove(tenant);
+                }
+                else
+                {
+                    _connectionsPerTenant[tenant] = perTenant - 1;
+                }
+            }
+        }
+    }
+
+    private async Task SendConnectionError(
+        IServerPushTransport transport, JoinTokenClaims principal, ServerErrorCode code, string message, CancellationToken cancellationToken)
+    {
+        var envelope = new MessageEnvelope
+        {
+            TenantId = new TenantId(principal.TenantId),
+            GameId = new GameId(principal.GameId),
+            RoomId = null,
+            SessionId = null,
+            PlayerId = null,
+            ProtocolVersion = ProtocolVersions.Current,
+            MessageType = MessageType.ServerError,
+            Sequence = 0,
+            TraceId = "admission",
+            Payload = new ServerError(code, message),
+        };
+
+        await transport.SendAsync(envelope, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Removes a closed connection from its room. Under <see cref="RoomLifecycle.Reap"/>
+    /// the room is also torn down once its last subscriber leaves, so memory tracks live
+    /// rooms rather than every room ever touched. Under <see cref="RoomLifecycle.Persist"/>
+    /// the original behavior is kept (the room and any subscriber bookkeeping linger).
+    /// </summary>
+    private void OnDisconnect(Connection connection)
+    {
+        _telemetry.Increment(TelemetryMetrics.ConnectionsClosed);
+
+        if (_lifecycle != RoomLifecycle.Reap || connection.RoomKey is not { } key)
+        {
+            return;
+        }
+
+        lock (RoomLock(key))
+        {
+            if (!_subscribers.TryGetValue(key, out var connections))
+            {
+                return;
+            }
+
+            connections.TryRemove(connection.Id, out _);
+
+            // Drop this viewer's delta baseline so it does not linger in the replicator.
+            if (_replicators.TryGetValue(key, out var replicator))
+            {
+                replicator.Resubscribe(new ViewerId(connection.Id.Value));
+            }
+
+            if (connections.IsEmpty)
+            {
+                _subscribers.TryRemove(key, out _);
+                _replicators.TryRemove(key, out _);
+                _roomLocks.TryRemove(key, out _);
+                _router.TryRemoveRoom(key);
+                _telemetry.Event(TelemetryEvents.RoomClosed, Tags(("roomId", key.RoomId.Value), ("tenantId", key.TenantId.Value)));
+            }
         }
     }
 
     /// <summary>Room keys that currently have at least one subscriber, for the tick driver.</summary>
     public IReadOnlyCollection<RoomKey> ActiveRooms => _subscribers.Keys.ToArray();
+
+    /// <summary>
+    /// Produces a read-only observation of a live room (authoritative tick, projected
+    /// entities, and per-viewer lag) for operator/admin debugging — the "drop in and see
+    /// what's happening" view. Returns false if the room is not currently placed. Never
+    /// mutates room state: it projects under the room lock for a consistent view and reads
+    /// only existing replicator/subscriber bookkeeping.
+    /// </summary>
+    public bool TryObserveRoom(RoomKey key, out RoomObservation observation)
+    {
+        observation = null!;
+        if (!_router.TryGetRoom(key, out var room))
+        {
+            return false;
+        }
+
+        long tick;
+        IReadOnlyList<EntitySnapshot> world;
+        lock (room)
+        {
+            tick = room.Snapshot().Tick;
+            world = room.Project();
+        }
+
+        var entities = world
+            .Select(e => new ObservedEntity(e.Id.Value, e.Version, e.Key.X, e.Key.Y, e.Key.Group, Convert.ToBase64String(e.Payload)))
+            .ToList();
+
+        var viewers = new List<ObservedViewer>();
+        _replicators.TryGetValue(key, out var replicator);
+        if (_subscribers.TryGetValue(key, out var connections))
+        {
+            foreach (var connection in connections.Values)
+            {
+                var pending = replicator?.PendingSnapshots(new ViewerId(connection.Id.Value)) ?? 0;
+                viewers.Add(new ObservedViewer(connection.Id.Value, connection.Player?.Value, pending));
+            }
+        }
+
+        observation = new RoomObservation(key.TenantId.Value, key.RoomId.Value, tick, entities, viewers);
+        return true;
+    }
 
     /// <summary>
     /// Advances the room one tick, persists the snapshot and events, then runs the
@@ -97,6 +330,9 @@ public sealed class RealtimeServer
         IReadOnlyList<EntitySnapshot> world;
         lock (room)
         {
+            // The backlog about to be drained — the backpressure gauge, captured before
+            // the tick empties the queue.
+            _telemetry.Measure(TelemetryMetrics.CommandQueueDepth, room.QueueDepth);
             result = room.Tick();
             // Project the post-tick state under the same lock for a consistent view.
             world = room.Project();
@@ -108,13 +344,30 @@ public sealed class RealtimeServer
             _events.Append(key, roomEvent);
         }
 
+        if (_eventLogRetentionTicks > 0)
+        {
+            // The snapshot just saved captures all state through this tick, so events at or
+            // below (tick - retention) are no longer needed for recovery: compact them away
+            // and keep only a trailing window. This bounds an otherwise unbounded log.
+            _events.TruncateThrough(key, result.Snapshot.Tick - _eventLogRetentionTicks);
+        }
+
         if (!_subscribers.TryGetValue(key, out var connections))
         {
             return;
         }
 
         var tick = result.Snapshot.Tick;
-        var replicator = _replicators.GetOrAdd(key, _ => new Replicator(ReplicationPolicy.Default));
+
+        // The replicator is created once, at join, with the room's per-game policy (see
+        // HandleJoinAsync). TickRoom is a strict reader: it must never create one here,
+        // or it could shadow the real policy with the conservative default. Subscribers
+        // exist (checked above) and a replicator is always established alongside them, so
+        // a miss is an unreachable invariant break — skip fan-out rather than fabricate.
+        if (!_replicators.TryGetValue(key, out var replicator))
+        {
+            return;
+        }
 
         // The game produced `world` (opaque payloads + a per-entity version that changes
         // when the entity changes + a relevance key). The platform never interprets the
@@ -292,19 +545,41 @@ public sealed class RealtimeServer
             return;
         }
 
-        var room = _router.GetOrCreateRoom(session.Tenant, join.RoomId, connection.Game ?? new GameId("unknown"));
-        lock (room)
+        var gameId = connection.Game ?? new GameId("unknown");
+        var key = new RoomKey(session.Tenant.TenantId, join.RoomId);
+
+        // Establish the room and this subscription atomically against teardown, so a join
+        // can never interleave with a concurrent last-leaver reap (see OnDisconnect). A
+        // join that would create a NEW room beyond the room ceiling is shed here.
+        var admitted = false;
+        lock (RoomLock(key))
         {
-            room.Join(player);
+            var isNewRoom = !_subscribers.ContainsKey(key);
+            if (!isNewRoom || _subscribers.Count < _admission.MaxRooms)
+            {
+                var room = _router.GetOrCreateRoom(session.Tenant, join.RoomId, gameId);
+                lock (room)
+                {
+                    room.Join(player);
+                }
+
+                _subscribers.GetOrAdd(key, _ => new ConcurrentDictionary<ConnectionId, Connection>())[connection.Id] = connection;
+                var replicator = _replicators.GetOrAdd(key, _ => new Replicator(_policyProvider(gameId)));
+                // A (re)joining connection cannot be assumed to hold any prior baseline: reset
+                // it so the next tick re-establishes a full keyframe for this viewer.
+                replicator.Resubscribe(new ViewerId(connection.Id.Value));
+                connection.JoinRoom(key, player);
+                admitted = true;
+            }
         }
 
-        var key = new RoomKey(session.Tenant.TenantId, join.RoomId);
-        connection.JoinRoom(key, player);
-        _subscribers.GetOrAdd(key, _ => new ConcurrentDictionary<ConnectionId, Connection>())[connection.Id] = connection;
-        var replicator = _replicators.GetOrAdd(key, _ => new Replicator(_policyProvider(connection.Game ?? new GameId("unknown"))));
-        // A (re)joining connection cannot be assumed to hold any prior baseline: reset
-        // it so the next tick re-establishes a full keyframe for this viewer.
-        replicator.Resubscribe(new ViewerId(connection.Id.Value));
+        if (!admitted)
+        {
+            _telemetry.Increment(TelemetryMetrics.AdmissionRejected, Tags(("reason", "max_rooms")));
+            await RejectAsync(connection, inbound, ServerErrorCode.Overloaded,
+                "Server is at room capacity; retry later.", cancellationToken).ConfigureAwait(false);
+            return;
+        }
 
         _telemetry.Event(TelemetryEvents.RoomJoined, Tags(("roomId", join.RoomId.Value), ("playerId", player.Value)));
     }
@@ -359,6 +634,14 @@ public sealed class RealtimeServer
             case CommandAdmission.RejectedInvalidCommand:
                 await RejectAsync(connection, inbound, ServerErrorCode.InvalidCommand,
                     $"Command '{command.Command}' is not valid for this game.", cancellationToken).ConfigureAwait(false);
+                break;
+            case CommandAdmission.RejectedOverloaded:
+                // Backpressure, not a client error: the room queue is full. Tell the
+                // client to retry shortly and count it as a shed under load, separately
+                // from protocol/validation rejections, so overload is visible on its own.
+                _telemetry.Increment(TelemetryMetrics.BackpressureRejections);
+                await RejectAsync(connection, inbound, ServerErrorCode.Overloaded,
+                    "Room is shedding load; retry shortly.", cancellationToken).ConfigureAwait(false);
                 break;
             default:
                 throw new ArgumentOutOfRangeException(nameof(admission), admission, "Unhandled admission outcome.");

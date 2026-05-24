@@ -38,4 +38,12 @@ public sealed class InMemorySessionRouter : ISessionRouter
     }
 
     public bool TryGetRoom(RoomKey key, out IGameRoom room) => _rooms.TryGetValue(key, out room!);
+
+    public bool TryRemoveRoom(RoomKey key) => _rooms.TryRemove(key, out _);
+
+    /// <summary>Number of placed rooms. A leak indicator: it should fall as rooms empty out.</summary>
+    public int RoomCount => _rooms.Count;
+
+    /// <summary>Keys of all currently placed rooms (for diagnostics/scenarios).</summary>
+    public IReadOnlyCollection<RoomKey> RoomKeys => _rooms.Keys.ToArray();
 }

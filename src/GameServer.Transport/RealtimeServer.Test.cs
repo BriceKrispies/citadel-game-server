@@ -18,6 +18,21 @@ public sealed class RealtimeServerBehaviorTests
     private static readonly RoomId Arena = new("arena");
     private static readonly PlayerId Player = new("p1");
 
+    // State is opaque to the platform; read player X back through the move-right game's
+    // projection / wire payload, exactly as a client would.
+    private static int X(IGameRoom room) =>
+        MoveRightGame.DecodeX(room.Project().Single(e => e.Id.Value == Player.Value).Payload);
+
+    private static int StoredX(RoomSnapshot snapshot)
+    {
+        var game = new MoveRightGame();
+        game.Restore(snapshot.State);
+        return MoveRightGame.DecodeX(game.Project().Single(e => e.Id.Value == Player.Value).Payload);
+    }
+
+    private static int SnapshotX(ServerSnapshot snapshot) =>
+        MoveRightGame.DecodeX(snapshot.Entities.Single(e => e.EntityId == Player.Value).Payload);
+
     // ---- Handshake: welcome / error / session gating -----------------------
 
     [Fact]
@@ -60,7 +75,7 @@ public sealed class RealtimeServerBehaviorTests
         var (transport, client) = harness.NewClient("c1", "tenant-a", "p1");
 
         // No ClientHello / ClientJoinRoom: a command arrives before any handshake.
-        client.Command(ClientCommandType.MoveRight, Arena);
+        client.Command(MoveRightGame.MoveRight, Arena);
         client.Close();
         await harness.Server.HandleConnectionAsync(transport, client.Principal);
 
@@ -81,7 +96,7 @@ public sealed class RealtimeServerBehaviorTests
         {
             c.Hello();
             c.Join(Arena);
-            c.Command(ClientCommandType.MoveRight, Arena);
+            c.Command(MoveRightGame.MoveRight, Arena);
         });
 
         await RunAsync(harness, "cb", "tenant-b", c =>
@@ -96,8 +111,8 @@ public sealed class RealtimeServerBehaviorTests
         Assert.True(harness.Router.TryGetRoom(harness.Key("tenant-a", "arena"), out var roomA));
         Assert.True(harness.Router.TryGetRoom(harness.Key("tenant-b", "arena"), out var roomB));
         Assert.NotSame(roomA, roomB);
-        Assert.Equal(1, roomA.Snapshot().Positions[Player]);
-        Assert.Equal(0, roomB.Snapshot().Positions[Player]);
+        Assert.Equal(1, X(roomA));
+        Assert.Equal(0, X(roomB));
     }
 
     [Fact]
@@ -109,7 +124,7 @@ public sealed class RealtimeServerBehaviorTests
         {
             c.Hello();
             c.Join(Arena);
-            c.Command(ClientCommandType.MoveRight, Arena);
+            c.Command(MoveRightGame.MoveRight, Arena);
         });
         await RunAsync(harness, "cb", "tenant-b", c =>
         {
@@ -139,7 +154,7 @@ public sealed class RealtimeServerBehaviorTests
         {
             c.Hello();
             c.Join(Arena);
-            c.Command(ClientCommandType.MoveRight, Arena);
+            c.Command(MoveRightGame.MoveRight, Arena);
         });
 
         var key = harness.Key("tenant-a", "arena");
@@ -147,11 +162,11 @@ public sealed class RealtimeServerBehaviorTests
 
         var snapshot = client.Received().Select(m => m.Payload).OfType<ServerSnapshot>().Single();
         Assert.Equal(1L, snapshot.Tick);
-        Assert.Equal(1, snapshot.Players.Single(p => p.PlayerId == new PlayerId("p1")).X);
+        Assert.Equal(1, SnapshotX(snapshot));
 
         // The same authoritative state is durably checkpointed.
         Assert.True(harness.Snapshots.TryGetLatest(key, out var stored));
-        Assert.Equal(1, stored.Positions[Player]);
+        Assert.Equal(1, StoredX(stored));
     }
 
     [Fact]
@@ -164,7 +179,7 @@ public sealed class RealtimeServerBehaviorTests
         {
             c.Hello();
             c.Join(Arena);
-            c.Command(ClientCommandType.MoveRight, Arena);
+            c.Command(MoveRightGame.MoveRight, Arena);
         });
 
         var (transportB, clientB) = harness.NewClient("cb", "tenant-b", "p1");
@@ -197,14 +212,14 @@ public sealed class RealtimeServerBehaviorTests
         {
             c.Hello();
             c.Join(Arena);
-            c.Command(ClientCommandType.MoveRight, Arena);
+            c.Command(MoveRightGame.MoveRight, Arena);
         });
 
         var key = harness.Key("tenant-a", "arena");
         await harness.Server.TickRoom(key);
 
         var logged = Assert.Single(harness.Events.Read(key));
-        Assert.Equal(RoomCommandType.MoveRight, logged.Command);
+        Assert.Equal(MoveRightGame.MoveRight, logged.Command);
         Assert.Equal(Player, logged.Player);
     }
 
@@ -218,8 +233,8 @@ public sealed class RealtimeServerBehaviorTests
         {
             c.Hello();
             c.Join(Arena);
-            c.Command(ClientCommandType.MoveRight, Arena, sequence: 10); // accepted
-            c.Command(ClientCommandType.MoveRight, Arena, sequence: 10); // duplicate -> rejected
+            c.Command(MoveRightGame.MoveRight, Arena, sequence: 10); // accepted
+            c.Command(MoveRightGame.MoveRight, Arena, sequence: 10); // duplicate -> rejected
         });
 
         var key = harness.Key("tenant-a", "arena");

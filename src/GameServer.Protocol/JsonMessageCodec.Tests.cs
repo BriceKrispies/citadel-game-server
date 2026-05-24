@@ -21,14 +21,14 @@ public sealed class JsonMessageCodecTests
             MessageType = MessageType.ClientCommand,
             Sequence = 42,
             TraceId = "trace-xyz",
-            Payload = new ClientCommand(ClientCommandType.MoveRight),
+            Payload = new ClientCommand("MoveRight"),
         };
 
         var decoded = _codec.Decode(_codec.Encode(original));
 
         Assert.Equal(original, decoded);
         var command = Assert.IsType<ClientCommand>(decoded.Payload);
-        Assert.Equal(ClientCommandType.MoveRight, command.Command);
+        Assert.Equal("MoveRight", command.Command);
     }
 
     [Fact]

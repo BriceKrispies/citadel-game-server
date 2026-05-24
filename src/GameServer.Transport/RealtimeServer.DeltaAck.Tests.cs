@@ -39,7 +39,7 @@ public sealed class RealtimeServerDeltaAckTests
             _ => ReplicationPolicy.Default with { SnapshotMode = SnapshotMode.Delta });
 
     private static bool ContainsPlayer(ServerSnapshot snapshot) =>
-        snapshot.Players.Any(p => p.PlayerId == Player);
+        snapshot.Entities.Any(e => e.EntityId == Player.Value);
 
     private static ServerSnapshot SoleSnapshot(FakeClient client) =>
         client.Received().Select(m => m.Payload).OfType<ServerSnapshot>().Single();
@@ -102,5 +102,35 @@ public sealed class RealtimeServerDeltaAckTests
         // baseline" fix would resend the player here and fail this assertion.
         await server.TickRoom(key);
         Assert.False(ContainsPlayer(SoleSnapshot(client)), "acked, unchanged state must not be resent");
+    }
+
+    [Fact]
+    public async Task DeltaBaseline_PersistsAcrossMultipleTicks_ReplicatorIsNotRecreated()
+    {
+        // Guards the join-vs-tick replicator-creation seam: the per-room replicator (and
+        // thus the per-viewer delta baseline) is established once at join with the room's
+        // policy. If TickRoom were ever able to recreate it — e.g. with the conservative
+        // default policy — the acked baseline would be lost and the player would reappear.
+        var harness = new SliceHarness("tenant-a");
+        var server = DeltaServer(harness);
+        var (transport, client) = harness.NewClient("c1", "tenant-a", "p1");
+        var key = harness.Key("tenant-a", "arena");
+
+        client.Hello();
+        client.Join(Arena);
+        var loop = server.HandleConnectionAsync(transport, client.Principal);
+
+        await server.TickRoom(key); // tick 1: keyframe carrying the player
+        client.Ack(ackedServerTick: 1, room: Arena);
+        client.Close();
+        await loop;
+
+        // Several more unchanged, unacked ticks. The baseline must survive all of them.
+        await server.TickRoom(key);
+        await server.TickRoom(key);
+
+        var snapshots = client.Received().Select(m => m.Payload).OfType<ServerSnapshot>().ToList();
+        Assert.True(ContainsPlayer(snapshots[0]), "first tick should carry the player (keyframe)");
+        Assert.All(snapshots.Skip(1), s => Assert.False(ContainsPlayer(s), "post-ack ticks must not resend a persisted baseline"));
     }
 }

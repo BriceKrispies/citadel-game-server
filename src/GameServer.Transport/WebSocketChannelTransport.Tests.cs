@@ -1,6 +1,7 @@
 using GameServer.Identity;
 using GameServer.Observability;
 using GameServer.Protocol;
+using GameServer.Simulation;
 using GameServer.Transport.Testing;
 
 namespace GameServer.Transport;
@@ -132,7 +133,7 @@ public sealed class WebSocketChannelTransportTests
 
     private static bool IsSnapshotFor(MessageEnvelope envelope, string player, int x) =>
         envelope.Payload is ServerSnapshot snapshot
-        && snapshot.Players.Any(p => p.PlayerId == new PlayerId(player) && p.X == x);
+        && snapshot.Entities.Any(e => e.EntityId == player && MoveRightGame.DecodeX(e.Payload) == x);
 
     private static MessageEnvelope Hello(string player, long sequence) =>
         Envelope(MessageType.ClientHello, new ClientHello(player), player, sequence, room: null);
@@ -141,7 +142,7 @@ public sealed class WebSocketChannelTransportTests
         Envelope(MessageType.ClientJoinRoom, new ClientJoinRoom(room), player, sequence, room);
 
     private static MessageEnvelope Move(string player, long sequence, RoomId room) =>
-        Envelope(MessageType.ClientCommand, new ClientCommand(ClientCommandType.MoveRight), player, sequence, room);
+        Envelope(MessageType.ClientCommand, new ClientCommand(MoveRightGame.MoveRight), player, sequence, room);
 
     private static MessageEnvelope Envelope(
         MessageType type, IMessagePayload payload, string player, long sequence, RoomId? room) =>

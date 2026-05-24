@@ -11,6 +11,13 @@ public enum CommandAdmission
 
     /// <summary>The command is not a legal/known command for the room's game.</summary>
     RejectedInvalidCommand,
+
+    /// <summary>
+    /// The room's bounded command queue is full: the client is producing commands
+    /// faster than ticks drain them. Shed explicitly (the client may retry the same
+    /// sequence once the queue drains) rather than grow the queue without limit.
+    /// </summary>
+    RejectedOverloaded,
 }
 
 /// <summary>

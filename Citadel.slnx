@@ -15,6 +15,7 @@
     <Project Path="src/GameServer.Transport/GameServer.Transport.csproj" />
   </Folder>
   <Folder Name="/tests/">
+    <Project Path="tests/GameServer.IntegrationTests/GameServer.IntegrationTests.csproj" />
     <Project Path="tests/GameServer.Tests/GameServer.Tests.csproj" />
   </Folder>
   <Folder Name="/tools/" />

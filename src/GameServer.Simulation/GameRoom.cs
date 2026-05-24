@@ -13,24 +13,41 @@ namespace GameServer.Simulation;
 /// </summary>
 public sealed class GameRoom : IGameRoom
 {
+    /// <summary>
+    /// Default cap on commands queued between ticks. Sized so a well-behaved client
+    /// sending a handful of intents per tick never trips it, while a flooding or
+    /// runaway client is shed before the queue can grow without bound.
+    /// </summary>
+    public const int DefaultMaxQueueDepth = 1024;
+
     private readonly IGameSimulation _game;
     private readonly ISimulationClock _clock;
     private readonly IRandomSource _random;
+    private readonly int _maxQueueDepth;
     private readonly Dictionary<PlayerId, long> _lastSequence = new();
     private readonly Queue<(PlayerId Player, string Command)> _pending = new();
 
-    public GameRoom(RoomId id, IGameSimulation game, ISimulationClock clock, IRandomSource random)
+    public GameRoom(RoomId id, IGameSimulation game, ISimulationClock clock, IRandomSource random, int maxQueueDepth = DefaultMaxQueueDepth)
     {
+        if (maxQueueDepth <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(maxQueueDepth), maxQueueDepth, "Queue depth must be positive.");
+        }
+
         Id = id;
         _game = game;
         _clock = clock;
         _random = random;
+        _maxQueueDepth = maxQueueDepth;
     }
 
     public RoomId Id { get; }
 
     /// <summary>Exposed so a game's future stochastic rules stay on the room's deterministic source.</summary>
     public IRandomSource Random => _random;
+
+    /// <summary>Commands currently queued for the next tick. A backpressure gauge for the tick driver.</summary>
+    public int QueueDepth => _pending.Count;
 
     public void Join(PlayerId player) => _game.Join(player);
 
@@ -53,6 +70,15 @@ public sealed class GameRoom : IGameRoom
         if (!_game.CanAccept(player, command))
         {
             return CommandAdmission.RejectedInvalidCommand;
+        }
+
+        // Backpressure: a bounded queue caps memory and per-tick work. We shed only
+        // after the command is otherwise valid, and without recording its sequence, so
+        // a legitimate command rejected under load can be retried unchanged once ticks
+        // drain the queue.
+        if (_pending.Count >= _maxQueueDepth)
+        {
+            return CommandAdmission.RejectedOverloaded;
         }
 
         _lastSequence[player] = sequence;

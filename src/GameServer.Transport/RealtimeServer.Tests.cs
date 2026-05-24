@@ -16,6 +16,21 @@ public sealed class RealtimeServerTests
 {
     private static readonly RoomId Arena = new("arena");
 
+    // State is opaque to the platform; read player X back through the move-right game's
+    // projection / wire payload, exactly as a client would.
+    private static int X(IGameRoom room, string player) =>
+        MoveRightGame.DecodeX(room.Project().Single(e => e.Id.Value == player).Payload);
+
+    private static int StoredX(RoomSnapshot snapshot, string player)
+    {
+        var game = new MoveRightGame();
+        game.Restore(snapshot.State);
+        return MoveRightGame.DecodeX(game.Project().Single(e => e.Id.Value == player).Payload);
+    }
+
+    private static int SnapshotX(ServerSnapshot snapshot, string player) =>
+        MoveRightGame.DecodeX(snapshot.Entities.Single(e => e.EntityId == player).Payload);
+
     [Fact]
     public async Task ValidClient_Connects_And_ReceivesWelcome()
     {
@@ -55,22 +70,22 @@ public sealed class RealtimeServerTests
 
         client.Hello();
         client.Join(Arena);
-        client.Command(ClientCommandType.MoveRight, Arena);
+        client.Command(MoveRightGame.MoveRight, Arena);
         client.Close();
         await harness.Server.HandleConnectionAsync(transport, client.Principal);
 
         var key = harness.Key("tenant-a", "arena");
 
         Assert.True(harness.Router.TryGetRoom(key, out var room));
-        Assert.Equal(0, room.Snapshot().Positions[new PlayerId("p1")]);
+        Assert.Equal(0, X(room, "p1"));
 
         await harness.Server.TickRoom(key);
 
-        Assert.Equal(1, room.Snapshot().Positions[new PlayerId("p1")]);
+        Assert.Equal(1, X(room, "p1"));
 
         var snapshot = client.Received().Select(m => m.Payload).OfType<ServerSnapshot>().Single();
         Assert.Equal(1L, snapshot.Tick);
-        Assert.Equal(1, snapshot.Players.Single(p => p.PlayerId == new PlayerId("p1")).X);
+        Assert.Equal(1, SnapshotX(snapshot, "p1"));
     }
 
     [Fact]
@@ -81,7 +96,7 @@ public sealed class RealtimeServerTests
 
         client.Hello();
         client.Join(Arena);
-        client.Command(ClientCommandType.MoveRight, Arena);
+        client.Command(MoveRightGame.MoveRight, Arena);
         client.Close();
         await harness.Server.HandleConnectionAsync(transport, client.Principal);
 
@@ -89,10 +104,10 @@ public sealed class RealtimeServerTests
         await harness.Server.TickRoom(key);
 
         Assert.True(harness.Snapshots.TryGetLatest(key, out var stored));
-        Assert.Equal(1, stored.Positions[new PlayerId("p1")]);
+        Assert.Equal(1, StoredX(stored, "p1"));
 
         var loggedEvent = Assert.Single(harness.Events.Read(key));
-        Assert.Equal(RoomCommandType.MoveRight, loggedEvent.Command);
+        Assert.Equal(MoveRightGame.MoveRight, loggedEvent.Command);
         Assert.True(harness.Telemetry.HasEvent(TelemetryEvents.SnapshotEmitted));
     }
 
@@ -133,7 +148,7 @@ public sealed class RealtimeServerTests
         var (transportA, clientA) = harness.NewClient("c-a", "tenant-a", "p1");
         clientA.Hello();
         clientA.Join(Arena);
-        clientA.Command(ClientCommandType.MoveRight, Arena);
+        clientA.Command(MoveRightGame.MoveRight, Arena);
         clientA.Close();
         await harness.Server.HandleConnectionAsync(transportA, clientA.Principal);
 
@@ -149,8 +164,39 @@ public sealed class RealtimeServerTests
         var snapshotA = clientA.Received().Select(m => m.Payload).OfType<ServerSnapshot>().Single();
         var snapshotB = clientB.Received().Select(m => m.Payload).OfType<ServerSnapshot>().Single();
 
-        Assert.Equal(1, snapshotA.Players.Single().X); // tenant A moved
-        Assert.Equal(0, snapshotB.Players.Single().X); // tenant B unaffected — isolated room state
+        Assert.Equal(1, SnapshotX(snapshotA, "p1")); // tenant A moved
+        Assert.Equal(0, SnapshotX(snapshotB, "p1")); // tenant B unaffected — isolated room state
+    }
+
+    [Fact]
+    public async Task OverloadedRoom_ShedsCommand_AsServerError_AndRecordsBackpressure()
+    {
+        // A one-slot command queue saturates immediately, so the second valid command
+        // exercises the backpressure path end to end.
+        var harness = new SliceHarness(maxQueueDepth: 1, "tenant-a");
+        var (transport, client) = harness.NewClient("c1", "tenant-a", "p1");
+
+        client.Hello();
+        client.Join(Arena);
+        client.Command(MoveRightGame.MoveRight, Arena); // accepted; fills the 1-slot queue
+        client.Command(MoveRightGame.MoveRight, Arena); // overflows -> shed under load
+        client.Close();
+        await harness.Server.HandleConnectionAsync(transport, client.Principal);
+
+        // The shed command comes back as an explicit, retryable Overloaded error...
+        var error = client.Received().Select(m => m.Payload).OfType<ServerError>().Single();
+        Assert.Equal(ServerErrorCode.Overloaded, error.Code);
+        // ...counted as backpressure, distinct from validation/protocol rejections.
+        Assert.Equal(1, harness.Telemetry.CountIncrements(TelemetryMetrics.BackpressureRejections));
+
+        // Correctness is preserved: only the one accepted command is applied.
+        var key = harness.Key("tenant-a", "arena");
+        await harness.Server.TickRoom(key);
+        Assert.True(harness.Router.TryGetRoom(key, out var room));
+        Assert.Equal(1, X(room, "p1"));
+
+        // The backlog was observable as a gauge at tick time.
+        Assert.Contains(harness.Telemetry.Measures, m => m.Metric == TelemetryMetrics.CommandQueueDepth);
     }
 
     [Fact]
@@ -161,8 +207,8 @@ public sealed class RealtimeServerTests
 
         client.Hello();
         client.Join(Arena);
-        client.Command(ClientCommandType.MoveRight, Arena, sequence: 10); // accepted
-        client.Command(ClientCommandType.MoveRight, Arena, sequence: 10); // stale
+        client.Command(MoveRightGame.MoveRight, Arena, sequence: 10); // accepted
+        client.Command(MoveRightGame.MoveRight, Arena, sequence: 10); // stale
         client.Close();
         await harness.Server.HandleConnectionAsync(transport, client.Principal);
 
@@ -173,6 +219,6 @@ public sealed class RealtimeServerTests
         await harness.Server.TickRoom(key);
 
         Assert.True(harness.Router.TryGetRoom(key, out var room));
-        Assert.Equal(1, room.Snapshot().Positions[new PlayerId("p1")]); // only first applied
+        Assert.Equal(1, X(room, "p1")); // only first applied
     }
 }

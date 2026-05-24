@@ -21,6 +21,11 @@ public sealed class DeltaCompressor
 
     private readonly int _maxUnackedSnapshots;
 
+    // Guards _baseline and _pending: Compute runs on the tick thread while Acknowledge/
+    // Forget run on connection threads, and an admin observer reads PendingSnapshotCount
+    // from yet another thread. Per-room and not hot, so a single lock is ample.
+    private readonly object _lock = new();
+
     // What each viewer has confirmed it holds.
     private readonly Dictionary<ViewerId, Dictionary<EntityId, long>> _baseline = new();
     // Snapshots sent but not yet acknowledged, keyed (ascending) by the tick they were
@@ -47,38 +52,41 @@ public sealed class DeltaCompressor
     /// <summary>Returns the entities new/changed since this viewer's acknowledged baseline.</summary>
     public IReadOnlyList<EntitySnapshot> Compute(ViewerId viewer, IReadOnlyList<EntitySnapshot> relevant, long tick)
     {
-        _baseline.TryGetValue(viewer, out var baseline);
-
-        var changed = new List<EntitySnapshot>();
-        foreach (var entity in relevant)
+        lock (_lock)
         {
-            // New entity, or its authoritative version differs from what the viewer has acked.
-            if (baseline is null || !baseline.TryGetValue(entity.Id, out var ackedVersion) || ackedVersion != entity.Version)
+            _baseline.TryGetValue(viewer, out var baseline);
+
+            var changed = new List<EntitySnapshot>();
+            foreach (var entity in relevant)
             {
-                changed.Add(entity);
+                // New entity, or its authoritative version differs from what the viewer has acked.
+                if (baseline is null || !baseline.TryGetValue(entity.Id, out var ackedVersion) || ackedVersion != entity.Version)
+                {
+                    changed.Add(entity);
+                }
             }
+
+            if (!_pending.TryGetValue(viewer, out var byTick))
+            {
+                byTick = new SortedDictionary<long, Dictionary<EntityId, long>>();
+                _pending[viewer] = byTick;
+            }
+
+            // Remember the full relevant set sent this tick so a later ack can commit it exactly.
+            byTick[tick] = relevant.ToDictionary(e => e.Id, e => e.Version);
+
+            // Bound the history: a client that never acks must not cost one retained
+            // snapshot per tick forever. Drop the oldest unacked snapshots beyond the
+            // window. The entities they held remain "changed" vs the baseline, so they
+            // keep being resent — nothing is lost; only the horizon for a precise ack of
+            // an old tick shortens (such an ack then commits nothing, which is safe).
+            while (byTick.Count > _maxUnackedSnapshots)
+            {
+                byTick.Remove(byTick.Keys.First());
+            }
+
+            return changed;
         }
-
-        if (!_pending.TryGetValue(viewer, out var byTick))
-        {
-            byTick = new SortedDictionary<long, Dictionary<EntityId, long>>();
-            _pending[viewer] = byTick;
-        }
-
-        // Remember the full relevant set sent this tick so a later ack can commit it exactly.
-        byTick[tick] = relevant.ToDictionary(e => e.Id, e => e.Version);
-
-        // Bound the history: a client that never acks must not cost one retained
-        // snapshot per tick forever. Drop the oldest unacked snapshots beyond the
-        // window. The entities they held remain "changed" vs the baseline, so they
-        // keep being resent — nothing is lost; only the horizon for a precise ack of
-        // an old tick shortens (such an ack then commits nothing, which is safe).
-        while (byTick.Count > _maxUnackedSnapshots)
-        {
-            byTick.Remove(byTick.Keys.First());
-        }
-
-        return changed;
     }
 
     /// <summary>
@@ -88,32 +96,35 @@ public sealed class DeltaCompressor
     /// </summary>
     public void Acknowledge(ViewerId viewer, long ackedTick)
     {
-        if (!_pending.TryGetValue(viewer, out var byTick))
+        lock (_lock)
         {
-            return;
-        }
-
-        long? commitTick = null;
-        foreach (var tick in byTick.Keys)
-        {
-            if (tick > ackedTick)
+            if (!_pending.TryGetValue(viewer, out var byTick))
             {
-                break; // keys ascend: no later tick can qualify.
+                return;
             }
 
-            commitTick = tick;
-        }
+            long? commitTick = null;
+            foreach (var tick in byTick.Keys)
+            {
+                if (tick > ackedTick)
+                {
+                    break; // keys ascend: no later tick can qualify.
+                }
 
-        if (commitTick is null)
-        {
-            return;
-        }
+                commitTick = tick;
+            }
 
-        _baseline[viewer] = new Dictionary<EntityId, long>(byTick[commitTick.Value]);
+            if (commitTick is null)
+            {
+                return;
+            }
 
-        foreach (var tick in byTick.Keys.Where(t => t <= commitTick.Value).ToList())
-        {
-            byTick.Remove(tick);
+            _baseline[viewer] = new Dictionary<EntityId, long>(byTick[commitTick.Value]);
+
+            foreach (var tick in byTick.Keys.Where(t => t <= commitTick.Value).ToList())
+            {
+                byTick.Remove(tick);
+            }
         }
     }
 
@@ -125,8 +136,11 @@ public sealed class DeltaCompressor
     /// </summary>
     public void Forget(ViewerId viewer)
     {
-        _baseline.Remove(viewer);
-        _pending.Remove(viewer);
+        lock (_lock)
+        {
+            _baseline.Remove(viewer);
+            _pending.Remove(viewer);
+        }
     }
 
     /// <summary>
@@ -136,6 +150,11 @@ public sealed class DeltaCompressor
     /// against the one the client eventually confirms. A backlog that climbs without
     /// bound is the signal a client has stopped acking and should be shed (backpressure).
     /// </summary>
-    public int PendingSnapshotCount(ViewerId viewer) =>
-        _pending.TryGetValue(viewer, out var byTick) ? byTick.Count : 0;
+    public int PendingSnapshotCount(ViewerId viewer)
+    {
+        lock (_lock)
+        {
+            return _pending.TryGetValue(viewer, out var byTick) ? byTick.Count : 0;
+        }
+    }
 }
