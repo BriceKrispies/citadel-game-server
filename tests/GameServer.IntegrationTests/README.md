@@ -17,6 +17,41 @@ dotnet test tests/GameServer.IntegrationTests/GameServer.IntegrationTests.csproj
 
 Then read the generated `artifacts/*/report.md`.
 
+## Running the Redis scenario against a real engine (Podman)
+
+`RedisRoomDirectoryScenario` is the only runnable proof of the real cross-node room
+directory/placement (`GameServer.Cluster.Redis` + its Lua). It is a `[SkippableFact]`
+using Testcontainers to spin a throwaway `redis:7-alpine`: with **no reachable container
+engine it SKIPS green** (the suite stays honest), so it does nothing in a vanilla dev
+checkout. To run it for real, point Testcontainers at **Podman** (no Docker Desktop):
+
+```
+pwsh scripts/integration-podman.ps1
+```
+
+The script is idempotent. It: starts the Podman machine if needed; resolves the
+Docker-API-compatible **named pipe** from `podman machine inspect` and exports
+`DOCKER_HOST=npipe://./pipe/<machine>` (no hardcoded user path); disables the Ryuk
+reaper (`TESTCONTAINERS_RYUK_DISABLED=true`) because rootless Podman rejects its
+privileges, and instead **owns teardown itself** (Testcontainers disposes each
+container, and the script sweeps any leftover `redis:7-alpine` in `finally`); warms the
+`docker.io/library/redis:7-alpine` pull to surface registry misconfig early; then runs
+the suite. Verify no leaks afterward with `podman ps -a`.
+
+If a clean Podman install can't pull `redis:7-alpine`, add docker.io to
+`registries.conf`: `unqualified-search-registries = ["docker.io"]`.
+
+## CI requirement
+
+To run this scenario in CI (rather than letting it skip), the pipeline must expose a
+container engine to Testcontainers: provision Podman (or Docker) on the runner, ensure
+its Docker-API socket is up, and export `DOCKER_HOST` (+ `TESTCONTAINERS_RYUK_DISABLED`
+under rootless Podman) before `dotnet test tests/GameServer.IntegrationTests` — exactly
+what `scripts/integration-podman.ps1` does locally. Building the pipeline itself is out
+of scope here; this is the standing requirement to wire it in. The fast unit loop
+(`tests/GameServer.Tests`) is hermetic and must **never** gain a container/socket
+dependency.
+
 ## Scenarios (the six gaps)
 
 | # | scenario | gap | status | what the artifact shows |
