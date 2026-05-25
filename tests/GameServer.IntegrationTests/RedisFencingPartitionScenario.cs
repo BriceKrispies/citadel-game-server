@@ -41,17 +41,23 @@ public sealed class RedisFencingPartitionScenario
     private static RoomKey Room(string room) => new(new TenantId("tenant-a"), new RoomId(room));
 
     /// <summary>
-    /// Partition + fencing — the core split-brain invariant. Node-A owns a room on a SHORT lease, then
-    /// "partitions": it stops renewing, so the lease lapses and the owner key expires. Node-B then claims
-    /// the room (legitimately, via the acquisition path). When node-A "returns," its lease-renewal worker
-    /// (modelled by <see cref="RedisRoomDirectory.TryRenew"/>, exactly what <c>RoomLeaseRenewalService</c>
-    /// now calls) hammers the room. The renewal MUST NEVER re-acquire it — even if node-B's own lease has a
-    /// gap — because renewal refreshes an existing lease, it does not acquire. A returning partitioned owner
-    /// re-establishing ownership through renewal is the split brain the fence exists to prevent.
+    /// Partition + fencing — the core split-brain invariant. Node-A owns a room, then "partitions": its
+    /// lease lapses and the owner key expires. Node-B then claims the room (legitimately, via the
+    /// acquisition path). When node-A "returns," its lease-renewal worker (modelled by
+    /// <see cref="RedisRoomDirectory.TryRenew"/>, exactly what <c>RoomLeaseRenewalService</c> now calls)
+    /// hammers the room. The renewal MUST NEVER re-acquire it — neither while node-B owns it NOR while the
+    /// room is unowned — because renewal refreshes an existing lease, it does not acquire. A returning
+    /// partitioned owner re-establishing ownership through renewal is the split brain the fence prevents.
     /// <para>
     /// Regression guard: before TryRenew, the renewal worker called TryClaim, whose acquire-when-unowned
     /// branch let node-A steal the room back the instant node-B's lease lapsed — observed re-stealing it
-    /// dozens of times in this exact setup. TryRenew has no acquire branch, so node-A is fenced.
+    /// dozens of times. TryRenew has no acquire branch, so node-A is fenced.
+    /// </para>
+    /// <para>
+    /// Deterministic by construction: the "partition" is modelled by DELETING the owner key (exactly what a
+    /// Redis <c>PX</c> lease expiry does) rather than sleeping past a real lease, and the lease is generous
+    /// so an ownership read can never race a scheduling stall. No wall-clock, no <c>Task.Delay</c> — the
+    /// proof holds regardless of CPU load (a short-lease/real-time version was flaky under full-suite load).
     /// </para>
     /// </summary>
     [SkippableFact]
@@ -59,34 +65,57 @@ public sealed class RedisFencingPartitionScenario
     {
         await using var redis = await StartRedisAsync();
         using var mux = await ConnectionMultiplexer.ConnectAsync(redis.GetConnectionString());
-        // A short lease so we can model a partition by simply not renewing, and so node-B's lease will lapse
-        // during node-A's barrage — the worst case: even with the room momentarily unowned, A's RENEWAL
-        // must not grab it (only placement/affinity may acquire).
-        var options = new RedisClusterOptions(KeyPrefix: $"partition-{Guid.NewGuid():n}", LeaseMs: 400);
+        // Generous lease: ownership reads in this test must never race a scheduling stall. The partition is
+        // simulated deterministically by expiring (deleting) the owner key, not by waiting out a short lease.
+        var options = new RedisClusterOptions(KeyPrefix: $"partition-{Guid.NewGuid():n}", LeaseMs: 30_000);
+        var db = mux.GetDatabase();
 
         var fromNodeA = new RedisRoomDirectory(mux, options);
         var fromNodeB = new RedisRoomDirectory(mux, options);
         var room = Room("arena");
+        var ownerKey = RedisClusterKeys.OwnerKey(options.KeyPrefix, room);
 
         // Node-A owns the room.
         Assert.True(fromNodeA.TryClaim(room, NodeA));
         Assert.True(fromNodeB.TryGetOwner(room, out var first) && first.Equals(NodeA));
 
-        // Node-A partitions: it stops renewing. Wait past the lease so the owner key expires (Redis PX).
-        await Task.Delay(options.LeaseMs + 250);
+        // Node-A partitions: its lease lapses. Model that deterministically by expiring the owner key —
+        // exactly what Redis PX expiry does — so there is no real-time race.
+        Assert.True(db.KeyDelete(ownerKey));
 
         // The room is now reclaimable: node-B legitimately takes it (acquisition path = TryClaim).
         Assert.True(fromNodeB.TryClaim(room, NodeB));
         Assert.True(fromNodeA.TryGetOwner(room, out var afterTakeover) && afterTakeover.Equals(NodeB));
 
         // Node-A "returns" and its renewal worker hammers TryRenew for the room still in its ActiveRooms.
-        // Run long enough that node-B's short lease lapses mid-barrage (no live B renewer here) — the
-        // strongest case. Not one renewal may resurrect node-A's ownership.
+        // While node-B owns it, not one renewal may resurrect node-A's ownership.
+        var resurrected = HammerRenew(fromNodeA, room);
+        Assert.Equal(0, resurrected);
+        Assert.True(fromNodeA.TryGetOwner(room, out var stillB) && stillB.Equals(NodeB));
+
+        // Strongest case — the room is now UNOWNED (node-B's lease also lapses with no renewer). Model it
+        // deterministically by expiring node-B's owner key. Even owner-less, node-A's renewal must STILL
+        // refuse to acquire: the only legitimate (re)acquisition path is placement/affinity, never renewal.
+        Assert.True(db.KeyDelete(ownerKey));
+        Assert.False(fromNodeA.TryGetOwner(room, out _)); // genuinely unowned
+
+        var resurrectedWhileUnowned = HammerRenew(fromNodeA, room);
+        Assert.Equal(0, resurrectedWhileUnowned);
+
+        // Node-A never re-owns the room through renewal — it remains unowned, awaiting a fresh placement.
+        Assert.False(fromNodeA.TryGetOwner(room, out _));
+
+        _output.WriteLine($"partition (deterministic): node-A expired, node-B took '{room.RoomId.Value}', then unowned; node-A renewal resurrected ownership {resurrected}+{resurrectedWhileUnowned} times (must be 0)");
+    }
+
+    /// <summary>Hammers <see cref="RedisRoomDirectory.TryRenew"/> for node-A across many threads (bounded
+    /// iterations, no wall-clock) and returns how many calls resurrected ownership — must always be 0.</summary>
+    private static int HammerRenew(RedisRoomDirectory fromNodeA, RoomKey room)
+    {
         var resurrected = 0;
-        var deadline = DateTime.UtcNow.AddMilliseconds(options.LeaseMs * 3);
         Parallel.For(0, Environment.ProcessorCount * 4, _ =>
         {
-            while (DateTime.UtcNow < deadline)
+            for (var i = 0; i < 50; i++)
             {
                 if (fromNodeA.TryRenew(room, NodeA))
                 {
@@ -94,16 +123,7 @@ public sealed class RedisFencingPartitionScenario
                 }
             }
         });
-
-        Assert.Equal(0, resurrected);
-        // Node-A never re-owns the room through renewal: either node-B still owns it, or its lease lapsed and
-        // it is simply unowned (awaiting a fresh placement) — but NEVER owned by node-A again.
-        if (fromNodeA.TryGetOwner(room, out var owner))
-        {
-            Assert.Equal(NodeB, owner);
-        }
-
-        _output.WriteLine($"partition: node-A lease lapsed, node-B took '{room.RoomId.Value}'; returning node-A's renewal resurrected ownership {resurrected} times (must be 0)");
+        return resurrected;
     }
 
     /// <summary>
