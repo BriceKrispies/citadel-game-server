@@ -118,13 +118,24 @@ public sealed class MatchmakingScenario
         await a.PostAsJsonAsync("/api/v1/matchmaking/tickets",
             new { tenantId = "tenant-a", gameId = "demo-game", gameVersion = 1, playerId = "bob" });
 
-        // tenant-a CAN fetch its own assignment (the assignment exists).
+        // tenant-a CAN fetch its own assignment (the assignment exists) — capture its real token so we
+        // can prove that exact secret never appears in the cross-tenant response body.
         var ownerFetch = await a.GetAsync(aliceLocation);
         Assert.Equal(HttpStatusCode.OK, ownerFetch.StatusCode);
+        var owned = await ownerFetch.Content.ReadFromJsonAsync<JoinTokenDto>();
+        Assert.False(string.IsNullOrWhiteSpace(owned!.Token));
 
         // tenant-b fetching the SAME (existing) tenant-a assignment id is forbidden — no token leak.
         var crossTenantFetch = await b.GetAsync(aliceLocation);
         Assert.Equal(HttpStatusCode.Forbidden, crossTenantFetch.StatusCode);
+
+        // The 403 body must NOT leak the assignment: neither the join token, the room id, nor the
+        // player id may appear in the cross-tenant response (a 403 status with the token in the body
+        // would still be a cross-tenant secret leak).
+        var leakedBody = await crossTenantFetch.Content.ReadAsStringAsync();
+        Assert.DoesNotContain(owned.Token, leakedBody);
+        Assert.DoesNotContain(owned.RoomId, leakedBody);
+        Assert.DoesNotContain("alice", leakedBody);
     }
 
     [Fact]
