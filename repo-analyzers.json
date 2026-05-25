@@ -33,6 +33,7 @@
 
       "GameServer.Routing": 2,
       "GameServer.Admin": 2,
+      "GameServer.Matchmaking": 2,
 
       "GameServer.Transport": 3,
       "GameServer.Cluster.Redis": 3

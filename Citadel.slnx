@@ -16,6 +16,7 @@
   <Folder Name="/src/2-Composition/">
     <Project Path="src/GameServer.Routing/GameServer.Routing.csproj" />
     <Project Path="src/GameServer.Admin/GameServer.Admin.csproj" />
+    <Project Path="src/GameServer.Matchmaking/GameServer.Matchmaking.csproj" />
   </Folder>
   <Folder Name="/src/3-Edge/">
     <Project Path="src/GameServer.Transport/GameServer.Transport.csproj" />

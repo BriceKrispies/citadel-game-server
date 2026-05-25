@@ -16,6 +16,7 @@
     <ProjectReference Include="..\GameServer.Transport\GameServer.Transport.csproj" />
     <ProjectReference Include="..\GameServer.Tenancy\GameServer.Tenancy.csproj" />
     <ProjectReference Include="..\GameServer.Routing\GameServer.Routing.csproj" />
+    <ProjectReference Include="..\GameServer.Matchmaking\GameServer.Matchmaking.csproj" />
     <ProjectReference Include="..\GameServer.Simulation\GameServer.Simulation.csproj" />
     <ProjectReference Include="..\GameServer.ControlPlane\GameServer.ControlPlane.csproj" />
     <ProjectReference Include="..\GameServer.Persistence\GameServer.Persistence.csproj" />

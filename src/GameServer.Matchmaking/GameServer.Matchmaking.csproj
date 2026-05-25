@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Open Match-style matchmaking (rank 2), entirely OUTSIDE the room runtime.
+    Strict adjacency: it may reference only the universal kernel (rank 0: Abstractions
+    ports + Protocol) plus the adjacent inner ring (rank 1). It must NOT reference
+    GameServer.Routing (also rank 2 — that would be a sideways CITADEL0002 dependency)
+    nor any room-runtime internals. The handoff to allocation + token mint is done
+    through matchmaking's OWN ports (IRoomAllocator / IMatchJoinTokenIssuer), wired to
+    the real Routing/Identity implementations only at the Host composition root.
+  -->
+  <ItemGroup>
+    <ProjectReference Include="..\GameServer.Abstractions\GameServer.Abstractions.csproj" />
+    <ProjectReference Include="..\GameServer.Protocol\GameServer.Protocol.csproj" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+</Project>

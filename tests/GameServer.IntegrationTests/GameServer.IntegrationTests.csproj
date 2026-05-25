@@ -29,6 +29,13 @@
     <Using Include="Xunit" />
   </ItemGroup>
 
+  <!-- Co-located tests for the Host's composition-root adapters live beside the production file
+       (Host has no fast-unit project of its own). They are excluded from the Host's production
+       compilation by src/Directory.Build.targets and compiled here, where the Host is referenced. -->
+  <ItemGroup>
+    <Compile Include="..\..\src\GameServer.Host\MatchmakingHostAdapters.Tests.cs" Link="HostAdapters\MatchmakingHostAdapters.Tests.cs" />
+  </ItemGroup>
+
   <ItemGroup>
     <ProjectReference Include="..\..\src\GameServer.Abstractions\GameServer.Abstractions.csproj" />
     <ProjectReference Include="..\..\src\GameServer.Host\GameServer.Host.csproj" />

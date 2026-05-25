@@ -5,6 +5,7 @@ using GameServer.Cluster.Redis;
 using GameServer.ControlPlane;
 using GameServer.Host;
 using GameServer.Identity;
+using GameServer.Matchmaking;
 using GameServer.Observability;
 using GameServer.Persistence;
 using GameServer.Persistence.Postgres;
@@ -306,6 +307,26 @@ builder.Services.AddSingleton<RoomLeaseRenewalService>(sp => new RoomLeaseRenewa
     sp.GetRequiredService<ILogger<RoomLeaseRenewalService>>()));
 builder.Services.AddSingleton<ISupervisedWorker>(sp => sp.GetRequiredService<RoomLeaseRenewalService>());
 
+// ---- Matchmaking (Wave 5): Open Match-style, OUTSIDE the room runtime --------
+// Matchmaking (rank 2) hands off to allocation + token mint through its OWN ports, adapted here at the
+// composition root. RoutingRoomAllocator bridges to the real Wave-4 IRoomPlacement (also rank 2) and
+// JoinTokenServiceIssuer to the real control-plane JoinTokenService — so Matchmaking never takes a
+// sideways rank-2 dependency on Routing (CITADEL0002 stays clean). The TicketRegistry buckets tickets
+// by tenant/game/version scope, and the director's atomic ticket-claim makes assignment idempotent.
+builder.Services.AddSingleton<IRoomAllocator>(sp => new RoutingRoomAllocator(
+    sp.GetRequiredService<InMemoryRoomRegistry>(), sp.GetRequiredService<IRoomPlacement>()));
+builder.Services.AddSingleton<IMatchJoinTokenIssuer>(sp => new JoinTokenServiceIssuer(
+    sp.GetRequiredService<JoinTokenService>()));
+builder.Services.AddSingleton<Evaluator>();
+builder.Services.AddSingleton<TicketRegistry>(sp => new TicketRegistry(sp.GetRequiredService<IMonotonicClock>()));
+var matchSize = builder.Configuration.GetValue("Matchmaking:MatchSize", 2);
+builder.Services.AddSingleton<IMatchFunction>(_ => new FixedSizeMatchFunction(matchSize));
+builder.Services.AddSingleton<MatchDirector>(sp => new MatchDirector(
+    sp.GetRequiredService<IMatchFunction>(),
+    sp.GetRequiredService<Evaluator>(),
+    sp.GetRequiredService<IRoomAllocator>(),
+    sp.GetRequiredService<IMatchJoinTokenIssuer>()));
+
 // ---- Readiness contributors (real dependency probes for /ready) -------------
 // Each probe is a CHEAP invariant on a hot-path dependency, so /ready proves the node can actually
 // do useful work without becoming a DoS vector. Registered as IReadinessCheck so the /ready endpoint
@@ -488,6 +509,43 @@ api.MapPost("/rooms/{roomId}/join-token",
 
     Audit(ctx, "mint-join-token", target, audit, clock);
     return Results.Created($"/realtime/v1/connect?joinToken={token.Token}", token);
+});
+
+// Matchmaking (Wave 5): submit a scoped ticket and run an assignment cycle. The scope is the caller's
+// tenant + the requested game + game version — baked in here, so a caller can never submit a ticket
+// for another tenant (Forbid enforces tenant access) and matchmaking only ever matches within scope.
+api.MapPost("/matchmaking/tickets",
+    (HttpContext ctx, MatchmakingTicketRequest request, TicketRegistry registry, MatchDirector director, IAuditLog audit, IClock clock) =>
+{
+    if (Forbid(ctx, request.TenantId, "submit-match-ticket", $"{request.TenantId}/{request.GameId}/{request.PlayerId}", audit, clock) is { } denied)
+    {
+        return denied;
+    }
+
+    var scope = new MatchScope(new TenantId(request.TenantId), new GameId(request.GameId), request.GameVersion);
+    var ticketId = $"{request.PlayerId}:{Guid.NewGuid():N}";
+    registry.Submit(ticketId, scope, new PlayerId(request.PlayerId), request.Skill);
+
+    // Run one cycle over THIS scope's tickets only (the registry buckets by scope — no cross-tenant leakage).
+    var pool = new Pool("default", scope);
+    var assignments = director.Cycle(pool, registry.ActiveTickets(scope));
+
+    // Drop the tickets that were assigned this cycle so they are not re-matched.
+    foreach (var match in assignments)
+    {
+        registry.Remove(scope, match.Players.Select(p => p.TicketId));
+    }
+
+    Audit(ctx, "submit-match-ticket", $"{scope}/{request.PlayerId}", audit, clock);
+
+    // If THIS player's ticket got assigned, hand back its room + token; otherwise it is queued.
+    var mine = assignments
+        .SelectMany(m => m.Players)
+        .FirstOrDefault(p => p.TicketId == ticketId);
+
+    return mine is null
+        ? Results.Accepted($"/api/v1/matchmaking/tickets/{ticketId}", new { ticketId, status = "queued" })
+        : Results.Ok(new JoinTokenContract(mine.JoinToken, scope.TenantId.Value, scope.GameId.Value, mine.RoomId.Value, mine.PlayerId.Value));
 });
 
 api.MapPost("/sessions", (HttpContext ctx, CreateSessionRequest request, InMemorySessionRegistry sessions, IAuditLog audit, IClock clock) =>
@@ -953,6 +1011,12 @@ public sealed class ApiKeyEntry
     public string? TenantId { get; set; }
     public List<string>? Roles { get; set; }
 }
+
+/// <summary>
+/// A matchmaking ticket submission. The scope (tenant/game/version) is authoritative: the caller may
+/// only submit for a tenant it is authorized for, and a ticket only ever matches within its scope.
+/// </summary>
+public sealed record MatchmakingTicketRequest(string TenantId, string GameId, int GameVersion, string PlayerId, int Skill = 0);
 
 /// <summary>
 /// An <see cref="IReadinessCheck"/> backed by a probe delegate, so each dependency's readiness logic

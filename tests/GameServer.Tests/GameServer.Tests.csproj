@@ -25,7 +25,9 @@
   -->
   <PropertyGroup>
     <SrcRoot>$(MSBuildThisFileDirectory)..\..\src</SrcRoot>
-    <CoLocatedExclude>$(SrcRoot)\**\bin\**\*.cs;$(SrcRoot)\**\obj\**\*.cs</CoLocatedExclude>
+    <!-- Composition-root (Host) co-located tests need the Host project referenced (a Web SDK with the
+         full dependency graph), so they compile in the integration suite, not this fast-unit project. -->
+    <CoLocatedExclude>$(SrcRoot)\**\bin\**\*.cs;$(SrcRoot)\**\obj\**\*.cs;$(SrcRoot)\GameServer.Host\**\*.cs</CoLocatedExclude>
   </PropertyGroup>
 
   <ItemGroup>
@@ -50,6 +52,7 @@
     <ProjectReference Include="..\..\src\GameServer.Observability\GameServer.Observability.csproj" />
     <ProjectReference Include="..\..\src\GameServer.ControlPlane\GameServer.ControlPlane.csproj" />
     <ProjectReference Include="..\..\src\GameServer.Admin\GameServer.Admin.csproj" />
+    <ProjectReference Include="..\..\src\GameServer.Matchmaking\GameServer.Matchmaking.csproj" />
     <ProjectReference Include="..\..\src\GameServer.LoadHarness\GameServer.LoadHarness.csproj" />
     <ProjectReference Include="..\..\src\GameServer.Replication\GameServer.Replication.csproj" />
     <ProjectReference Include="..\..\src\GameServer.Identity\GameServer.Identity.csproj" />
