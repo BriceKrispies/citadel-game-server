@@ -73,7 +73,11 @@ public sealed class RealtimeServer
     private readonly ITelemetrySink _telemetry;
     private readonly Func<GameId, ReplicationPolicy> _policyProvider;
     private readonly RoomLifecycle _lifecycle;
-    private readonly AdmissionPolicy _admission;
+    // The admission ceilings. Mutable so an authorized platform admin can re-tighten/loosen capacity at
+    // runtime (the limits-config endpoint) without a redeploy. Reads/writes are guarded by _admissionLock,
+    // the same lock that serializes the admission counters, so a ceiling change is consistent with the
+    // count it is compared against.
+    private AdmissionPolicy _admission;
     // 0 = unbounded (never truncate). >0 keeps that many trailing ticks of events; older
     // events are covered by the saved snapshot and compacted away.
     private readonly int _eventLogRetentionTicks;
@@ -195,7 +199,24 @@ public sealed class RealtimeServer
     /// The admission policy this server is enforcing. Exposed so operators (and tests) can
     /// confirm the deployed host actually configured ceilings rather than running unbounded.
     /// </summary>
-    public AdmissionPolicy Admission => _admission;
+    public AdmissionPolicy Admission
+    {
+        get { lock (_admissionLock) { return _admission; } }
+    }
+
+    /// <summary>
+    /// Replaces the admission ceilings at runtime (the platform-admin limits-config endpoint). Guarded by
+    /// the admission lock so the new ceilings are immediately consistent with the live counts they gate.
+    /// Tightening below the current count does not evict existing connections/rooms — it simply stops
+    /// admitting NEW ones until the live count falls back under the ceiling (graceful, never a forced drop).
+    /// </summary>
+    public void UpdateAdmission(AdmissionPolicy policy)
+    {
+        lock (_admissionLock)
+        {
+            _admission = policy;
+        }
+    }
 
     /// <summary>
     /// The current graceful-degradation level the data plane is shedding at (<see cref="DegradationLevel.Normal"/>
@@ -462,6 +483,58 @@ public sealed class RealtimeServer
 
     /// <summary>Room keys that currently have at least one subscriber, for the tick driver.</summary>
     public IReadOnlyCollection<RoomKey> ActiveRooms => _subscribers.Keys.ToArray();
+
+    /// <summary>
+    /// Administratively terminates a live room through the AUTHORITATIVE pathway — the same teardown a
+    /// last-subscriber reap performs, never a side mutation of room state. Under the room lock (so it can
+    /// never interleave with a tick/join/leave) it fires the game's <c>OnTerminate</c> hook, drops the
+    /// subscriber set, replicator and routed room, closes each connection's outbound buffer, and releases
+    /// the cluster ownership claim. After it returns the room leaves <see cref="ActiveRooms"/> and
+    /// <see cref="TryObserveRoom"/> reports it gone — no orphan state. Returns false if the room was not
+    /// active. Observable: emits <see cref="TelemetryEvents.RoomClosed"/> tagged with the operator reason.
+    /// </summary>
+    public bool TerminateRoom(RoomKey key, string reason)
+    {
+        lock (RoomLock(key))
+        {
+            // Nothing to terminate if the room is not currently placed. Idempotent for a second call.
+            var hadSubscribers = _subscribers.TryRemove(key, out var connections);
+            var hadRoom = _router.TryGetRoom(key, out var room);
+            if (!hadSubscribers && !hadRoom)
+            {
+                return false;
+            }
+
+            // Authoritative teardown: the game finalizes its own state via OnTerminate. The room owns the
+            // mutation; the lock serializes it against the tick driver. Only the room mutates the room.
+            if (hadRoom)
+            {
+                lock (room!)
+                {
+                    room.Terminate();
+                }
+            }
+
+            // Release each viewer's outbound buffer (and any background writer) so the connection's send
+            // loop completes and the socket is not left dangling.
+            if (connections is not null)
+            {
+                foreach (var connection in connections.Values)
+                {
+                    _ = connection.Outbound.DisposeAsync();
+                }
+            }
+
+            _replicators.TryRemove(key, out _);
+            _router.TryRemoveRoom(key);
+            // Relinquish the cluster ownership claim so the directory's OwnedCount tracks live rooms and
+            // another node may later take this room. No-op when clustering is not wired.
+            _roomDirectory?.Release(key, _localNode);
+            _telemetry.Event(TelemetryEvents.RoomClosed,
+                Tags(("roomId", key.RoomId.Value), ("tenantId", key.TenantId.Value), ("reason", reason)));
+            return true;
+        }
+    }
 
     /// <summary>
     /// Produces a read-only observation of a live room (authoritative tick, projected
@@ -805,6 +878,9 @@ public sealed class RealtimeServer
         // The game refused the join via its CanJoin rule (capacity/ban/phase). Distinct from a
         // platform capacity shed: it gets a definitive NotJoined error, not a retryable Overloaded.
         var gameRefused = false;
+        // Snapshot the (mutable) admission ceilings once so a concurrent runtime update cannot make the
+        // two checks below disagree with each other mid-join.
+        var admission = Admission;
         lock (RoomLock(key))
         {
             var isNewRoom = !_subscribers.ContainsKey(key);
@@ -820,11 +896,11 @@ public sealed class RealtimeServer
             // the per-tenant ceiling, so one tenant cannot consume global room capacity and
             // starve the others (noisy-neighbour isolation). Joins into an already-running room
             // never count against a ceiling.
-            else if (isNewRoom && TenantRoomCount(session.Tenant.TenantId) >= _admission.MaxRoomsPerTenant)
+            else if (isNewRoom && TenantRoomCount(session.Tenant.TenantId) >= admission.MaxRoomsPerTenant)
             {
                 rejectReason = "tenant_max_rooms";
             }
-            else if (isNewRoom && _subscribers.Count >= _admission.MaxRooms)
+            else if (isNewRoom && _subscribers.Count >= admission.MaxRooms)
             {
                 rejectReason = "max_rooms";
             }

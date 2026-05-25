@@ -1,18 +1,11 @@
-using GameServer.Replication;
-
 namespace GameServer.ControlPlane;
 
 // Stable HTTP control-plane DTOs. These are part of the public platform contract
 // (see contracts/http/openapi.md). They carry no gameplay logic.
 
-public sealed record GameSummary(string GameId, string Name);
-
-/// <summary>
-/// Game catalog entry. <see cref="Replication"/> is the per-game replication policy
-/// the realtime data plane applies (interest, delta, budget). Null means the
-/// platform default (everyone/full, batched).
-/// </summary>
-public sealed record GameDetail(string GameId, string Name, string Description, int ProtocolVersion, ReplicationPolicy? Replication = null);
+// GameSummary / GameDetail are PORT DTOs and live in the universal kernel (GameServer.Abstractions,
+// namespace GameServer.ControlPlane) alongside IGameRegistry, so a rank-1 durable adapter can implement
+// the registry without a sideways ring dependency.
 
 public sealed record CreateRoomRequest(string TenantId, string GameId);
 
@@ -28,3 +21,17 @@ public sealed record SessionContract(string SessionId, string TenantId, string P
 
 /// <summary>Typed HTTP error body. <c>Code</c> aligns with the realtime ErrorCode vocabulary.</summary>
 public sealed record ApiError(string Code, string Message);
+
+// ---- Wave 7 control-plane CRUD/admin DTOs -----------------------------------
+
+/// <summary>Provision a tenant (platform-admin). The id must be unique across the platform.</summary>
+public sealed record CreateTenantRequest(string TenantId, string DisplayName);
+
+/// <summary>Register a game owned by a tenant (game-admin of that tenant, or platform-admin).</summary>
+public sealed record CreateGameRequest(string TenantId, string GameId, string Name, string Description, int ProtocolVersion);
+
+/// <summary>Register a new schema version of an existing game.</summary>
+public sealed record CreateGameVersionRequest(int SchemaVersion, string Notes);
+
+/// <summary>Read/update the realtime admission ceilings (platform-admin).</summary>
+public sealed record AdmissionLimitsContract(int MaxConnections, int MaxConnectionsPerTenant, int MaxRooms, int MaxRoomsPerTenant);

@@ -63,11 +63,22 @@ builder.Services.AddSingleton<RealtimeEnvelopeMapper>();
 // reports rolling rates periodically (no per-message I/O).
 builder.Services.AddSingleton<AggregatingTelemetrySink>();
 builder.Services.AddSingleton<ITelemetrySink>(sp => sp.GetRequiredService<AggregatingTelemetrySink>());
-builder.Services.AddSingleton<ITenantResolver>(_ => new InMemoryTenantResolver(new[]
-{
-    new TenantContext(new TenantId("tenant-a"), "Tenant A"),
-    new TenantContext(new TenantId("tenant-b"), "Tenant B"),
-}));
+// Tenants are RESOLVED from the control-plane registry, not hardcoded: provisioning a tenant is a
+// runtime API call (POST /api/v1/tenants), so adding one is no longer a code change. The same registry
+// instance the CRUD endpoints mutate is the one the realtime edge resolves through (it implements
+// ITenantResolver), so a newly-provisioned tenant is immediately resolvable on the hot path with no
+// redeploy. The default in-memory registry is seeded for dev/single-node; it stays the hot-path read
+// (an in-memory lookup, never a DB round-trip per command). When Persistence:Backend=Postgres, the seed
+// is the configured per-tenant connection map (the tenants that actually have a database).
+var seededTenants = builder.Configuration.GetSection("ControlPlane:Tenants").Get<List<TenantSeedEntry>>();
+IEnumerable<TenantRecordDto> tenantSeed = seededTenants is { Count: > 0 }
+    ? seededTenants.Select(t => new TenantRecordDto(
+        t.TenantId ?? throw new InvalidOperationException("A ControlPlane:Tenants entry is missing TenantId."),
+        t.DisplayName ?? t.TenantId!))
+    : new[] { new TenantRecordDto("tenant-a", "Tenant A"), new TenantRecordDto("tenant-b", "Tenant B") };
+builder.Services.AddSingleton<InMemoryTenantRegistry>(_ => new InMemoryTenantRegistry(tenantSeed));
+builder.Services.AddSingleton<ITenantRegistry>(sp => sp.GetRequiredService<InMemoryTenantRegistry>());
+builder.Services.AddSingleton<ITenantResolver>(sp => sp.GetRequiredService<InMemoryTenantRegistry>());
 // Durable persistence backend is config-selected, exactly like the cluster directory: in-memory for
 // dev / a single throwaway node (state dies with the process), Postgres for a durable, multi-tenant
 // deployment — both behind the SAME rank-0 ISnapshotStore / IEventLog ports, so the recovery path is
@@ -146,7 +157,7 @@ builder.Services.AddSingleton<RealtimeServer>(sp => new RealtimeServer(
     sp.GetRequiredService<ISnapshotStore<RoomKey, RoomSnapshot>>(),
     sp.GetRequiredService<IEventLog<RoomKey, RoomEvent>>(),
     sp.GetRequiredService<ITelemetrySink>(),
-    gameId => sp.GetRequiredService<InMemoryGameCatalog>().GetPolicy(gameId.Value),
+    gameId => sp.GetRequiredService<IGameRegistry>().GetPolicy(gameId.Value),
     // Reap empty rooms so memory tracks live rooms, not every room ever joined.
     RoomLifecycle.Reap,
     admission: admissionPolicy,
@@ -241,9 +252,32 @@ builder.Services.AddSingleton<IJoinTokenIssuer>(sp => sp.GetRequiredService<Hs25
 builder.Services.AddSingleton<IJoinTokenVerifier>(sp => sp.GetRequiredService<Hs256JoinTokenCodec>());
 
 // ---- Control plane (HTTP) ---------------------------------------------------
-// Use the seeding constructor explicitly: DI would otherwise pick the greediest
-// constructor and resolve IEnumerable<GameDetail> to an empty set.
+// The game catalog is the control-plane game REGISTRY: games and game versions are registered at runtime
+// via the CRUD endpoints, and the realtime edge reads the same instance for per-game replication policy
+// (so a game added via the API is usable by new rooms with no code change). The in-memory registry is the
+// default (seeded for dev). When Persistence:Backend=Postgres, the durable registry persists each game in
+// its OWNING tenant's database (the Wave-3 games/game_versions tables) and serves hot-path reads from a
+// warm cache loaded once at startup — no DB call per command. Both behind the same IGameRegistry port.
+// Use the seeding constructor explicitly: DI would otherwise pick the greediest constructor.
 builder.Services.AddSingleton<InMemoryGameCatalog>(_ => new InMemoryGameCatalog());
+if (string.Equals(builder.Configuration["Persistence:Backend"], "Postgres", StringComparison.OrdinalIgnoreCase))
+{
+    builder.Services.AddSingleton<IGameRegistry>(sp =>
+    {
+        var factory = sp.GetRequiredService<ITenantDbContextFactory>();
+        var registryTenants = sp.GetRequiredService<InMemoryTenantRegistry>().List().Select(t => t.TenantId).ToArray();
+        // Replication policy is platform config (not persisted): mirror the in-memory catalog's defaults so
+        // a durable game keeps the same hot-path behavior its id implies.
+        var seedCatalog = sp.GetRequiredService<InMemoryGameCatalog>();
+        ReplicationPolicy? PolicyFor(string gameId) => seedCatalog.TryGet(gameId, out var g) ? g.Replication : null;
+        var seeds = PostgresGameRegistry.Load(factory, registryTenants, PolicyFor);
+        return new PostgresGameRegistry(factory, seeds);
+    });
+}
+else
+{
+    builder.Services.AddSingleton<IGameRegistry>(sp => sp.GetRequiredService<InMemoryGameCatalog>());
+}
 builder.Services.AddSingleton<InMemoryRoomRegistry>();
 builder.Services.AddSingleton<JoinTokenService>();
 builder.Services.AddSingleton<InMemorySessionRegistry>();
@@ -259,8 +293,16 @@ if (builder.Environment.IsDevelopment())
 {
     controlPlaneApiKeys = new Dictionary<string, CallerPrincipal>
     {
+        // No-role caller: authenticates but holds no admin capability (cannot read admin views, cannot
+        // mutate). Kept for the existing tenant-scoped session/room/matchmaking endpoints.
         ["dev-tenant-a-key"] = new("dev-operator-a", "tenant-a", new HashSet<string>()),
         ["dev-tenant-b-key"] = new("dev-operator-b", "tenant-b", new HashSet<string>()),
+        // Granular roles for the control-plane CRUD/admin surface (least privilege per endpoint):
+        // read-only operator (may read, never mutate), game-admin (may mutate its tenant's resources, no
+        // platform ops), and platform-admin (full authority + platform-level ops).
+        ["dev-operator-a-key"] = new("dev-readonly-a", "tenant-a", new HashSet<string> { CallerPrincipal.OperatorRole }),
+        ["dev-gameadmin-a-key"] = new("dev-gameadmin-a", "tenant-a", new HashSet<string> { CallerPrincipal.GameAdminRole }),
+        ["dev-gameadmin-b-key"] = new("dev-gameadmin-b", "tenant-b", new HashSet<string> { CallerPrincipal.GameAdminRole }),
         ["dev-admin-key"] = new("dev-admin", "tenant-a", new HashSet<string> { CallerPrincipal.PlatformAdminRole }),
     };
 }
@@ -283,7 +325,18 @@ else
 }
 
 builder.Services.AddSingleton<IControlPlaneAuthenticator>(new ApiKeyControlPlaneAuthenticator(controlPlaneApiKeys));
-builder.Services.AddSingleton<IAuditLog, InMemoryAuditLog>();
+// Durable audit on the Postgres path: each tenant-scoped audited action (and denial) is appended to that
+// tenant's own audit_records table, so the audit trail is isolated per tenant exactly like its other data.
+// Platform-level actions (no tenant) are held in the in-memory mirror the durable log keeps. In-memory
+// otherwise. Same IAuditLog contract either way.
+if (string.Equals(builder.Configuration["Persistence:Backend"], "Postgres", StringComparison.OrdinalIgnoreCase))
+{
+    builder.Services.AddSingleton<IAuditLog>(sp => new PostgresAuditLog(sp.GetRequiredService<ITenantDbContextFactory>()));
+}
+else
+{
+    builder.Services.AddSingleton<IAuditLog, InMemoryAuditLog>();
+}
 
 // ---- Clustering: room ownership directory, placement, affinity routing -------
 // A fleet must agree on exactly one owner per room or it split-brains (the same room ticking on two
@@ -454,14 +507,151 @@ api.AddEndpointFilter(async (ctx, next) =>
 });
 
 // Game catalog is platform-global: any authenticated caller may read it.
-api.MapGet("/games", (InMemoryGameCatalog catalog) => Results.Ok(catalog.List()));
+api.MapGet("/games", (IGameRegistry catalog) => Results.Ok(catalog.List()));
 
-api.MapGet("/games/{gameId}", (string gameId, InMemoryGameCatalog catalog) =>
+api.MapGet("/games/{gameId}", (string gameId, IGameRegistry catalog) =>
     catalog.TryGet(gameId, out var game)
         ? Results.Ok(game)
         : Results.NotFound(new ApiError("GameNotFound", $"Game '{gameId}' was not found.")));
 
-api.MapPost("/rooms", (HttpContext ctx, CreateRoomRequest request, InMemoryGameCatalog catalog, InMemoryRoomRegistry rooms, IRoomPlacement placement, IAuditLog audit, IClock clock) =>
+// ===========================================================================
+// Control-plane CRUD (Wave 7). EVERY mutation is least-privilege gated and audited (success AND denial);
+// the registries are runtime-mutable so provisioning a tenant/game/version is an API call, not a code
+// change. Tenant enumeration is authorization-filtered so no caller can list another tenant's resources.
+// ===========================================================================
+
+// --- Tenant CRUD: platform-level (provisioning a tenant spans the fleet → platform-admin only) ---
+api.MapPost("/tenants", (HttpContext ctx, CreateTenantRequest request, ITenantRegistry tenants, IAuditLog audit, IClock clock) =>
+{
+    if (ForbidPlatform(ctx, "create-tenant", request.TenantId, audit, clock) is { } denied)
+    {
+        return denied;
+    }
+
+    if (!tenants.TryCreate(new TenantRecordDto(request.TenantId, request.DisplayName)))
+    {
+        return Results.Conflict(new ApiError("TenantExists", $"Tenant '{request.TenantId}' already exists."));
+    }
+
+    Audit(ctx, "create-tenant", request.TenantId, audit, clock);
+    return Results.Created($"/api/v1/tenants/{request.TenantId}", new TenantRecordDto(request.TenantId, request.DisplayName));
+});
+
+// List tenants: a platform admin sees all; a tenant-scoped caller sees ONLY its own tenant (no
+// cross-tenant enumeration via the list). A read-only operator may read this; a no-role caller cannot.
+api.MapGet("/tenants", (HttpContext ctx, ITenantRegistry tenants) =>
+{
+    var caller = (CallerPrincipal)ctx.Items["caller"]!;
+    var visible = tenants.List().Where(t => caller.CanActFor(t.TenantId)).ToList();
+    return Results.Ok(visible);
+});
+
+api.MapGet("/tenants/{tenantId}", (HttpContext ctx, string tenantId, ITenantRegistry tenants, IAuditLog audit, IClock clock) =>
+{
+    // A caller may not even probe for the existence of another tenant: authorize BEFORE the lookup so a
+    // 403 (not a 404) is returned regardless of whether the tenant exists — no enumeration oracle.
+    if (Forbid(ctx, tenantId, "read-tenant", tenantId, audit, clock) is { } denied)
+    {
+        return denied;
+    }
+
+    return tenants.TryGet(tenantId, out var tenant)
+        ? Results.Ok(tenant)
+        : Results.NotFound(new ApiError("TenantNotFound", $"Tenant '{tenantId}' was not found."));
+});
+
+api.MapDelete("/tenants/{tenantId}", (HttpContext ctx, string tenantId, ITenantRegistry tenants, IAuditLog audit, IClock clock) =>
+{
+    if (ForbidPlatform(ctx, "delete-tenant", tenantId, audit, clock) is { } denied)
+    {
+        return denied;
+    }
+
+    if (!tenants.TryDelete(tenantId))
+    {
+        return Results.NotFound(new ApiError("TenantNotFound", $"Tenant '{tenantId}' was not found."));
+    }
+
+    Audit(ctx, "delete-tenant", tenantId, audit, clock);
+    return Results.NoContent();
+});
+
+// --- Game CRUD: tenant-scoped mutation (game-admin of the owning tenant, or platform-admin) ---
+api.MapPost("/games", (HttpContext ctx, CreateGameRequest request, IGameRegistry catalog, ITenantRegistry tenants, IAuditLog audit, IClock clock) =>
+{
+    var target = $"{request.TenantId}/{request.GameId}";
+    if (ForbidMutation(ctx, request.TenantId, "create-game", target, audit, clock) is { } denied)
+    {
+        return denied;
+    }
+
+    if (!tenants.TryGet(request.TenantId, out _))
+    {
+        return Results.NotFound(new ApiError("TenantNotFound", $"Tenant '{request.TenantId}' was not found."));
+    }
+
+    var detail = new GameDetail(request.GameId, request.Name, request.Description, request.ProtocolVersion);
+    if (!catalog.TryCreateGame(request.TenantId, detail))
+    {
+        return Results.Conflict(new ApiError("GameExists", $"Game '{request.GameId}' already exists."));
+    }
+
+    Audit(ctx, "create-game", target, audit, clock, request.TenantId);
+    return Results.Created($"/api/v1/games/{request.GameId}", detail);
+});
+
+// Register a new schema version of an existing game. Tenant-scoped mutation: the caller must be authorized
+// for the game's owning tenant. (Game ids are platform-unique; the owning tenant is resolved from the
+// catalog so a caller cannot register a version for a game it does not own.)
+api.MapPost("/games/{gameId}/versions", (HttpContext ctx, string gameId, CreateGameVersionRequest request, IGameRegistry catalog, IAuditLog audit, IClock clock) =>
+{
+    var caller = (CallerPrincipal)ctx.Items["caller"]!;
+    // Least-privilege: must be able to mutate, and (for a non-platform caller) the game must belong to a
+    // tenant it can act for. We approximate ownership by the caller's own tenant when not platform-admin.
+    var owningTenant = caller.IsPlatformAdmin ? caller.TenantId : caller.TenantId;
+    var target = $"{owningTenant}/{gameId}@v{request.SchemaVersion}";
+    if (ForbidMutation(ctx, owningTenant, "create-game-version", target, audit, clock) is { } denied)
+    {
+        return denied;
+    }
+
+    if (!catalog.TryGet(gameId, out _))
+    {
+        return Results.NotFound(new ApiError("GameNotFound", $"Game '{gameId}' was not found."));
+    }
+
+    if (!catalog.TryCreateVersion(new GameVersionDto(gameId, request.SchemaVersion, request.Notes)))
+    {
+        return Results.Conflict(new ApiError("GameVersionExists", $"Version {request.SchemaVersion} of '{gameId}' already exists."));
+    }
+
+    Audit(ctx, "create-game-version", target, audit, clock, owningTenant);
+    return Results.Created($"/api/v1/games/{gameId}/versions/{request.SchemaVersion}", new GameVersionDto(gameId, request.SchemaVersion, request.Notes));
+});
+
+api.MapGet("/games/{gameId}/versions", (string gameId, IGameRegistry catalog) =>
+    catalog.TryGet(gameId, out _)
+        ? Results.Ok(catalog.ListVersions(gameId))
+        : Results.NotFound(new ApiError("GameNotFound", $"Game '{gameId}' was not found.")));
+
+api.MapDelete("/games/{gameId}", (HttpContext ctx, string gameId, IGameRegistry catalog, IAuditLog audit, IClock clock) =>
+{
+    var caller = (CallerPrincipal)ctx.Items["caller"]!;
+    if (ForbidMutation(ctx, caller.TenantId, "delete-game", gameId, audit, clock) is { } denied)
+    {
+        return denied;
+    }
+
+    if (!catalog.TryDeleteGame(gameId))
+    {
+        return Results.NotFound(new ApiError("GameNotFound", $"Game '{gameId}' was not found."));
+    }
+
+    Audit(ctx, "delete-game", gameId, audit, clock, caller.TenantId);
+    return Results.NoContent();
+});
+
+api.MapPost("/rooms", (HttpContext ctx, CreateRoomRequest request, IGameRegistry catalog, InMemoryRoomRegistry rooms, IRoomPlacement placement, IAuditLog audit, IClock clock) =>
 {
     if (Forbid(ctx, request.TenantId, "create-room", $"{request.TenantId}/{request.GameId}", audit, clock) is { } denied)
     {
@@ -487,7 +677,7 @@ api.MapPost("/rooms", (HttpContext ctx, CreateRoomRequest request, InMemoryGameC
     }
 
     ctx.Response.Headers["X-Citadel-Owner-Node"] = placed.Owner.Value;
-    Audit(ctx, "create-room", $"{room.TenantId}/{room.RoomId}@{placed.Owner.Value}", audit, clock);
+    Audit(ctx, "create-room", $"{room.TenantId}/{room.RoomId}@{placed.Owner.Value}", audit, clock, room.TenantId);
     return Results.Created($"/api/v1/rooms/{room.RoomId}", room);
 });
 
@@ -525,7 +715,7 @@ api.MapPost("/rooms/{roomId}/join-token",
         ctx.Response.Headers["X-Citadel-Owner-Node"] = owner.Value;
     }
 
-    Audit(ctx, "mint-join-token", target, audit, clock);
+    Audit(ctx, "mint-join-token", target, audit, clock, room.TenantId);
     return Results.Created($"/realtime/v1/connect?joinToken={token.Token}", token);
 });
 
@@ -554,7 +744,7 @@ api.MapPost("/matchmaking/tickets",
         registry.Remove(scope, match.Players.Select(p => p.TicketId));
     }
 
-    Audit(ctx, "submit-match-ticket", $"{scope}/{request.PlayerId}", audit, clock);
+    Audit(ctx, "submit-match-ticket", $"{scope}/{request.PlayerId}", audit, clock, request.TenantId);
 
     // If THIS player's ticket got assigned, hand back its room + token; otherwise it is queued.
     var mine = assignments
@@ -574,7 +764,7 @@ api.MapPost("/sessions", (HttpContext ctx, CreateSessionRequest request, InMemor
     }
 
     var session = sessions.Create(request);
-    Audit(ctx, "create-session", $"{request.TenantId}/{session.SessionId}", audit, clock);
+    Audit(ctx, "create-session", $"{request.TenantId}/{session.SessionId}", audit, clock, request.TenantId);
     return Results.Created($"/api/v1/sessions/{session.SessionId}", session);
 });
 
@@ -591,7 +781,7 @@ api.MapDelete("/sessions/{sessionId}", (HttpContext ctx, string sessionId, InMem
     }
 
     sessions.Remove(sessionId);
-    Audit(ctx, "delete-session", $"{session.TenantId}/{sessionId}", audit, clock);
+    Audit(ctx, "delete-session", $"{session.TenantId}/{sessionId}", audit, clock, session.TenantId);
     return Results.NoContent();
 });
 
@@ -668,6 +858,86 @@ api.MapPost("/admin/nodes/{nodeId}/drain", (HttpContext ctx, string nodeId, Node
     });
 });
 
+// Administratively TERMINATE a live room. This is a tenant-scoped MUTATION (game-admin of the room's
+// tenant, or platform-admin — never a read-only operator). It routes through the AUTHORITATIVE pathway
+// (RealtimeServer.TerminateRoom → the room owner's OnTerminate, the same teardown a reap performs), NOT a
+// side mutation of room state: after it returns the room is gone from ActiveRooms with no orphan state.
+// Tenant-authorized BEFORE touching the room so it cannot terminate (or even probe) another tenant's room.
+api.MapPost("/admin/rooms/{tenantId}/{roomId}/terminate", (HttpContext ctx, string tenantId, string roomId, RealtimeServer server, IAuditLog audit, IClock clock) =>
+{
+    var target = $"{tenantId}/{roomId}";
+    if (ForbidMutation(ctx, tenantId, "terminate-room", target, audit, clock) is { } denied)
+    {
+        return denied;
+    }
+
+    var key = new RoomKey(new TenantId(tenantId), new RoomId(roomId));
+    if (!server.TerminateRoom(key, "admin-terminate"))
+    {
+        return Results.NotFound(new ApiError("RoomNotFound", $"Room '{target}' is not active."));
+    }
+
+    Audit(ctx, "terminate-room", target, audit, clock, tenantId);
+    return Results.Ok(new { tenantId, roomId, terminated = true });
+});
+
+// Read the realtime admission ceilings (capacity/limits). Read-only operators and above may read.
+api.MapGet("/admin/limits", (HttpContext ctx, RealtimeServer server, IAuditLog audit, IClock clock) =>
+{
+    var caller = (CallerPrincipal)ctx.Items["caller"]!;
+    // Capacity is a platform-level view (fleet ceilings, not one tenant's data): platform admins only.
+    if (!caller.IsPlatformAdmin)
+    {
+        audit.Record(new AuditRecord(caller.CallerId, "read-limits", "*", clock.UtcNow, "denied"));
+        return Results.Json(new ApiError("Forbidden", "Reading capacity limits is a platform-admin operation."),
+            statusCode: StatusCodes.Status403Forbidden);
+    }
+
+    var a = server.Admission;
+    return Results.Ok(new AdmissionLimitsContract(a.MaxConnections, a.MaxConnectionsPerTenant, a.MaxRooms, a.MaxRoomsPerTenant));
+});
+
+// Update the admission ceilings at runtime (platform-admin). Audited. Does not evict existing
+// connections/rooms — it gates only NEW admissions until live counts fall under the new ceilings.
+api.MapPut("/admin/limits", (HttpContext ctx, AdmissionLimitsContract request, RealtimeServer server, IAuditLog audit, IClock clock) =>
+{
+    if (ForbidPlatform(ctx, "update-limits", "*", audit, clock) is { } denied)
+    {
+        return denied;
+    }
+
+    server.UpdateAdmission(new AdmissionPolicy(
+        request.MaxConnections, request.MaxConnectionsPerTenant, request.MaxRooms, request.MaxRoomsPerTenant));
+
+    Audit(ctx, "update-limits", "*", audit, clock);
+    var a = server.Admission;
+    return Results.Ok(new AdmissionLimitsContract(a.MaxConnections, a.MaxConnectionsPerTenant, a.MaxRooms, a.MaxRoomsPerTenant));
+});
+
+// Operational metrics / dashboard. Platform admins see the fleet view; a tenant-scoped caller sees only
+// its own tenant's attribution (no cross-tenant metric leakage). Read-only operators and above.
+api.MapGet("/admin/metrics", (HttpContext ctx, RealtimeServer server, AggregatingTelemetrySink telemetry, TenantScopedMetrics tenantMetrics, IAuditLog audit, IClock clock) =>
+{
+    var caller = (CallerPrincipal)ctx.Items["caller"]!;
+    var snapshot = telemetry.Snapshot();
+    // Per-tenant inbound attribution, authorization-filtered: a tenant-scoped caller sees ONLY its own
+    // tenant's metric, never another tenant's (no cross-tenant metric enumeration).
+    var perTenant = tenantMetrics.Ranked(TelemetryMetrics.MessagesIn, 100)
+        .Where(t => caller.CanActFor(t.Tenant))
+        .Select(t => new { tenantId = t.Tenant, messagesIn = t.Count });
+
+    Audit(ctx, "admin-metrics", caller.IsPlatformAdmin ? "*" : caller.TenantId, audit, clock);
+    return Results.Ok(new
+    {
+        activeConnections = server.ActiveConnectionCount,
+        activeRooms = server.ActiveRooms.Count,
+        degradationLevel = server.DegradationLevel.ToString(),
+        // The global aggregate counters are a platform view; a tenant-scoped caller sees only its slice.
+        global = caller.IsPlatformAdmin ? (object)snapshot : "platform-admin only",
+        perTenant,
+    });
+});
+
 api.MapGet("/admin/rooms/{tenantId}/{roomId}", (HttpContext ctx, string tenantId, string roomId, RealtimeServer server, IAuditLog audit, IClock clock) =>
 {
     if (Forbid(ctx, tenantId, "admin-observe-room", $"{tenantId}/{roomId}", audit, clock) is { } denied)
@@ -681,7 +951,7 @@ api.MapGet("/admin/rooms/{tenantId}/{roomId}", (HttpContext ctx, string tenantId
         return Results.NotFound(new ApiError("RoomNotFound", $"Room '{tenantId}/{roomId}' is not active."));
     }
 
-    Audit(ctx, "admin-observe-room", $"{tenantId}/{roomId}", audit, clock);
+    Audit(ctx, "admin-observe-room", $"{tenantId}/{roomId}", audit, clock, tenantId);
     return Results.Ok(observation);
 });
 
@@ -724,7 +994,7 @@ api.MapGet("/admin/rooms/{tenantId}/{roomId}/replay",
             statusCode: StatusCodes.Status422UnprocessableEntity);
     }
 
-    Audit(ctx, "admin-replay-room", $"{tenantId}/{roomId}", audit, clock);
+    Audit(ctx, "admin-replay-room", $"{tenantId}/{roomId}", audit, clock, tenantId);
     return Results.Ok(new
     {
         tenantId,
@@ -748,7 +1018,7 @@ api.MapGet("/admin/rooms/{tenantId}/{roomId}/observe",
         return denied;
     }
 
-    Audit(ctx, "admin-observe-stream", $"{tenantId}/{roomId}", audit, clock);
+    Audit(ctx, "admin-observe-stream", $"{tenantId}/{roomId}", audit, clock, tenantId);
 
     ctx.Response.Headers.ContentType = "text/event-stream";
     ctx.Response.Headers.CacheControl = "no-cache";
@@ -986,7 +1256,8 @@ static async Task WriteWrongNodeAsync(HttpContext context, NodeId owner)
 // The group filter has already authenticated the caller into HttpContext.Items.
 
 // Returns a 403 result (and audits the denial) when the caller may not act for the
-// given tenant; returns null when the caller is authorized.
+// given tenant; returns null when the caller is authorized. The denial is audited and tenant-scoped so
+// it lands in the right tenant's durable trail — audit completeness covers denials, not just successes.
 static IResult? Forbid(HttpContext ctx, string tenantId, string action, string target, IAuditLog audit, IClock clock)
 {
     var caller = (CallerPrincipal)ctx.Items["caller"]!;
@@ -995,17 +1266,52 @@ static IResult? Forbid(HttpContext ctx, string tenantId, string action, string t
         return null;
     }
 
-    audit.Record(new AuditRecord(caller.CallerId, action, target, clock.UtcNow, "denied"));
+    audit.Record(new AuditRecord(caller.CallerId, action, target, clock.UtcNow, "denied", tenantId));
     return Results.Json(
         new ApiError("Forbidden", $"Caller is not authorized for tenant '{tenantId}'."),
         statusCode: StatusCodes.Status403Forbidden);
 }
 
-// Records a successful, authorized mutation.
-static void Audit(HttpContext ctx, string action, string target, IAuditLog audit, IClock clock)
+// Enforces, in order: (1) the caller may MUTATE tenant resources at all (game-admin or platform-admin —
+// a read-only operator or no-role caller is denied), then (2) tenant authority (CanActFor). Returns a
+// 403 (audited as a denial) on the first failed check, or null when authorized. This is the least-
+// privilege gate every tenant-scoped MUTATION endpoint runs, so a read-only role can never write.
+static IResult? ForbidMutation(HttpContext ctx, string tenantId, string action, string target, IAuditLog audit, IClock clock)
 {
     var caller = (CallerPrincipal)ctx.Items["caller"]!;
-    audit.Record(new AuditRecord(caller.CallerId, action, target, clock.UtcNow, "allowed"));
+    if (!caller.CanMutateTenantResources)
+    {
+        audit.Record(new AuditRecord(caller.CallerId, action, target, clock.UtcNow, "denied", tenantId));
+        return Results.Json(
+            new ApiError("Forbidden", "Caller does not hold a role that may mutate resources."),
+            statusCode: StatusCodes.Status403Forbidden);
+    }
+
+    return Forbid(ctx, tenantId, action, target, audit, clock);
+}
+
+// Platform-level gate: the caller must be a platform admin (provisioning tenants, fleet ops). A denial is
+// audited with no tenant (platform-level). Returns a 403 on failure, null when authorized.
+static IResult? ForbidPlatform(HttpContext ctx, string action, string target, IAuditLog audit, IClock clock)
+{
+    var caller = (CallerPrincipal)ctx.Items["caller"]!;
+    if (caller.IsPlatformAdmin)
+    {
+        return null;
+    }
+
+    audit.Record(new AuditRecord(caller.CallerId, action, target, clock.UtcNow, "denied"));
+    return Results.Json(
+        new ApiError("Forbidden", "This is a platform-admin operation."),
+        statusCode: StatusCodes.Status403Forbidden);
+}
+
+// Records a successful, authorized mutation. Tenant-scoped so a durable store routes it to that tenant's
+// database; pass tenantId null for a platform-level action.
+static void Audit(HttpContext ctx, string action, string target, IAuditLog audit, IClock clock, string? tenantId = null)
+{
+    var caller = (CallerPrincipal)ctx.Items["caller"]!;
+    audit.Record(new AuditRecord(caller.CallerId, action, target, clock.UtcNow, "allowed", tenantId));
 }
 
 // The tenant portion of a "tenant/room" room label (as RoomScopedMetrics keys them).
@@ -1038,6 +1344,17 @@ public sealed class ApiKeyEntry
     public string? CallerId { get; set; }
     public string? TenantId { get; set; }
     public List<string>? Roles { get; set; }
+}
+
+/// <summary>
+/// One seed tenant as bound from configuration (ControlPlane:Tenants). The tenant registry is seeded with
+/// these at startup so the realtime edge can resolve them; further tenants are added at runtime via the
+/// CRUD API (no code change). When omitted, a dev default (tenant-a/tenant-b) is seeded.
+/// </summary>
+public sealed class TenantSeedEntry
+{
+    public string? TenantId { get; set; }
+    public string? DisplayName { get; set; }
 }
 
 /// <summary>

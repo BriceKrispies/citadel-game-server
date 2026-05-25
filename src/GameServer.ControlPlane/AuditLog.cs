@@ -2,20 +2,9 @@ using System.Collections.Concurrent;
 
 namespace GameServer.ControlPlane;
 
-/// <summary>
-/// One audited control-plane action: who did it, what they did, to which target, when,
-/// and the outcome (e.g. "allowed"/"denied"). Admin/control operations must leave an
-/// audit trail per the platform's security rules.
-/// </summary>
-public sealed record AuditRecord(string Actor, string Action, string Target, DateTimeOffset WhenUtc, string Outcome);
-
-/// <summary>Append-only audit trail for control-plane mutations.</summary>
-public interface IAuditLog
-{
-    void Record(AuditRecord record);
-
-    IReadOnlyList<AuditRecord> Read();
-}
+// The IAuditLog port and the AuditRecord DTO are in the universal kernel (GameServer.Abstractions) so a
+// durable rank-1 adapter can implement the port without a sideways ring dependency. This file holds only
+// the in-memory adapter.
 
 /// <summary>
 /// In-memory audit trail (per process). Durable storage is a future swap behind
