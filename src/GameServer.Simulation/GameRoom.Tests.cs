@@ -216,6 +216,145 @@ public sealed class GameRoomTests
         Assert.Equal(7, header.Seed); // the header carried the original room's seed
     }
 
+    [Fact]
+    public void DeterministicReplay_StochasticGame_FreshRoomReseededFromHeader_YieldsIdenticalState()
+    {
+        // ADVERSARIAL (replay determinism): unlike MoveRight/GridWalk, this game DRAWS from the room's
+        // IRandomSource on every applied command, so its post-snapshot trajectory depends entirely on
+        // the RNG sequence. The cross-process replay invariant only holds if the captured seed re-seeds
+        // a fresh source into the IDENTICAL draw sequence. The game shares the room's random instance
+        // (the room exposes it via .Random), exactly how a real stochastic game would be wired.
+        var roomId = new RoomId("arena");
+        var snapshots = new InMemorySnapshotStore<RoomId, RoomSnapshot>();
+        var events = new InMemoryEventLog<RoomId, RoomEvent>(e => e.Tick);
+
+        // --- original room: empty baseline snapshot, then a run of stochastic steps recorded as events
+        var originalRandom = new SeededRandomSource(seed: 31337);
+        var originalGame = new StochasticWalkGame(originalRandom);
+        var original = new GameRoom(roomId, originalGame, new FakeSimulationClock(), originalRandom);
+        original.Join(Player);
+        snapshots.Save(roomId, original.Snapshot()); // baseline at tick 0, header captures seed 31337
+        for (var seq = 1; seq <= 6; seq++)
+        {
+            original.TryEnqueue(Player, StochasticWalkGame.Step, seq);
+            foreach (var produced in original.Tick().Events)
+            {
+                events.Append(roomId, produced);
+            }
+        }
+
+        var originalPos = StochasticWalkGame.Decode(original.Project().Single().Payload);
+
+        // --- fresh room (new process): a DIFFERENT construction seed, restored from the header. ---
+        Assert.True(snapshots.TryGetLatest(roomId, out var header));
+        Assert.Equal(31337, header.Seed);
+        var replayRandom = new SeededRandomSource(seed: 1); // deliberately wrong construction seed
+        var replayGame = new StochasticWalkGame(replayRandom);
+        var replayed = new GameRoom(roomId, replayGame, new FakeSimulationClock(), replayRandom);
+        replayed.RestoreFrom(header); // re-seeds the shared source to 31337
+        foreach (var recovered in events.Read(roomId))
+        {
+            Assert.True(replayed.ApplyRecoveredEvent(recovered));
+        }
+
+        var replayedPos = StochasticWalkGame.Decode(replayed.Project().Single().Payload);
+        Assert.Equal(originalPos, replayedPos); // identical despite the stochastic rule
+    }
+
+    [Fact]
+    public void DeterministicReplay_StochasticGame_WithoutReseed_Diverges_ProvingSeedIsLoadBearing()
+    {
+        // The companion to the above: prove the seed is genuinely load-bearing (not decorative). A
+        // legacy header-less snapshot (Seed == 0) leaves the fresh source on its OWN construction seed
+        // — the DOCUMENTED fallback. With a stochastic game and a different construction seed, that
+        // fallback necessarily DIVERGES; replay is only deterministic when the seed is present. This
+        // locks in that a missing seed is an explicit (different-but-defined) outcome, never silent
+        // "it happened to match".
+        var roomId = new RoomId("arena");
+        var snapshots = new InMemorySnapshotStore<RoomId, RoomSnapshot>();
+        var events = new InMemoryEventLog<RoomId, RoomEvent>(e => e.Tick);
+
+        var originalRandom = new SeededRandomSource(seed: 31337);
+        var originalGame = new StochasticWalkGame(originalRandom);
+        var original = new GameRoom(roomId, originalGame, new FakeSimulationClock(), originalRandom);
+        original.Join(Player);
+        snapshots.Save(roomId, original.Snapshot());
+        for (var seq = 1; seq <= 6; seq++)
+        {
+            original.TryEnqueue(Player, StochasticWalkGame.Step, seq);
+            foreach (var produced in original.Tick().Events)
+            {
+                events.Append(roomId, produced);
+            }
+        }
+
+        var originalPos = StochasticWalkGame.Decode(original.Project().Single().Payload);
+
+        Assert.True(snapshots.TryGetLatest(roomId, out var header));
+        // Strip the header to simulate a legacy/seedless snapshot (Seed == 0 → no reseed on restore).
+        var seedless = new RoomSnapshot(header.Tick, header.State);
+
+        var replayRandom = new SeededRandomSource(seed: 1);
+        var replayGame = new StochasticWalkGame(replayRandom);
+        var replayed = new GameRoom(roomId, replayGame, new FakeSimulationClock(), replayRandom);
+        replayed.RestoreFrom(seedless); // Seed == 0: keeps construction seed 1, does NOT reseed to 0
+        foreach (var recovered in events.Read(roomId))
+        {
+            Assert.True(replayed.ApplyRecoveredEvent(recovered));
+        }
+
+        var replayedPos = StochasticWalkGame.Decode(replayed.Project().Single().Payload);
+        Assert.NotEqual(originalPos, replayedPos); // seedless replay diverges: the seed is load-bearing
+    }
+
+    /// <summary>
+    /// A stochastic reference game for replay testing: each player has an integer position that a
+    /// "Step" command advances by a random amount drawn from the SHARED room random source. Because
+    /// the trajectory depends on the RNG, replay is only reproducible if the source is re-seeded to the
+    /// original's seed — exactly the cross-process invariant the snapshot header exists to guarantee.
+    /// </summary>
+    private sealed class StochasticWalkGame : IGameSimulation
+    {
+        public const string Step = "Step";
+
+        private readonly IRandomSource _random;
+        private readonly Dictionary<PlayerId, int> _pos = new();
+
+        public StochasticWalkGame(IRandomSource random) => _random = random;
+
+        public void Join(PlayerId player) => _pos.TryAdd(player, 0);
+        public bool HasPlayer(PlayerId player) => _pos.ContainsKey(player);
+        public bool CanAccept(PlayerId player, string command) => command == Step;
+
+        public void Apply(PlayerId player, string command) => _pos[player] += _random.Next(1000);
+
+        public IReadOnlyList<EntitySnapshot> Project() => _pos
+            .Select(p => new EntitySnapshot(new EntityId(p.Key.Value), p.Value, RelevanceKey.None, Encode(p.Value)))
+            .ToList();
+
+        public byte[] Serialize() =>
+            System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(_pos.ToDictionary(kv => kv.Key.Value, kv => kv.Value));
+
+        public void Restore(byte[] state)
+        {
+            _pos.Clear();
+            var restored = System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, int>>(state) ?? new();
+            foreach (var (player, p) in restored)
+            {
+                _pos[new PlayerId(player)] = p;
+            }
+        }
+
+        public static byte[] Encode(int pos)
+        {
+            var payload = new byte[4];
+            System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(payload, pos);
+            return payload;
+        }
+
+        public static int Decode(byte[] payload) => System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(payload);
+    }
+
     /// <summary>Records applied commands; accepts a single legal command. No real state.</summary>
     private sealed class FakeGame : IGameSimulation
     {

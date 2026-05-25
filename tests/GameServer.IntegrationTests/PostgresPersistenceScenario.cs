@@ -75,6 +75,18 @@ public sealed class PostgresPersistenceScenario
 
     private static DurableRoomKey KeyOf(RoomKey key) => new(key.TenantId.Value, key.RoomId.Value);
 
+    /// <summary>Raw, EF-bypassing row count in a tenant's OWN database — the storage-level isolation
+    /// proof: a tenant's database must hold only that tenant's rows. The table name is a fixed literal
+    /// (never client input), so this is not an injection vector.</summary>
+    private static async Task<long> CountRowsAsync(
+        ITenantConnectionResolver resolver, string tenantId, string table)
+    {
+        await using var connection = new NpgsqlConnection(resolver.ConnectionStringFor(tenantId));
+        await connection.OpenAsync();
+        await using var cmd = new NpgsqlCommand($"SELECT COUNT(*) FROM {table};", connection);
+        return (long)(await cmd.ExecuteScalarAsync())!;
+    }
+
     [SkippableFact]
     public async Task RestartRecovery_RoomStateRestored_FromDurablePostgres()
     {
@@ -164,21 +176,147 @@ public sealed class PostgresPersistenceScenario
             var snapshots = new PostgresSnapshotStore<RoomKey>(factory, KeyOf);
             var events = new PostgresEventLog<RoomKey>(factory, KeyOf);
 
-            // Tenant A writes a room named "arena".
+            // Tenant A writes a room named "arena" (DISTINCT seed + payload + event count).
             var aKey = new RoomKey(new TenantId("tenant-a"), new RoomId("arena"));
             snapshots.Save(aKey, new RoomSnapshot(7, new byte[] { 1, 2, 3 }, Seed: 42, GameSchemaVersion: 1));
             events.Append(aKey, new RoomEvent(7, new PlayerId("p1"), MoveRightGame.MoveRight));
 
-            // Tenant B, using the SAME room id, must see NOTHING of tenant A's — different database.
+            // Step 1 — B's database has ZERO of A's rows BEFORE B writes anything (the leak check):
+            // a read scoped to B's key (B's database) for the SAME room id sees nothing of A's, AND a
+            // raw table-level count in B's database confirms it holds none of A's rows.
             var bKey = new RoomKey(new TenantId("tenant-b"), new RoomId("arena"));
             Assert.False(snapshots.TryGetLatest(bKey, out _), "tenant B must not see tenant A's snapshot");
             Assert.Empty(events.Read(bKey));
+            Assert.Equal(0, await CountRowsAsync(resolver, "tenant-b", "room_snapshots"));
+            Assert.Equal(0, await CountRowsAsync(resolver, "tenant-b", "room_events"));
+            // And A's database holds exactly A's rows (not, e.g., a shared table holding both).
+            Assert.Equal(1, await CountRowsAsync(resolver, "tenant-a", "room_snapshots"));
+            Assert.Equal(1, await CountRowsAsync(resolver, "tenant-a", "room_events"));
 
-            // Tenant A still sees its own data (sanity: isolation did not also hide A from A).
+            // Step 2 — B writes its OWN room with the SAME room id but DIFFERENT data. Neither tenant's
+            // read may return the other's row: each key resolves to its own database, so even an
+            // identical room id cannot collide or swap. (Catches a shared-table/forgotten-filter bug.)
+            snapshots.Save(bKey, new RoomSnapshot(99, new byte[] { 9, 9, 9 }, Seed: 7, GameSchemaVersion: 2));
+            events.Append(bKey, new RoomEvent(99, new PlayerId("p2"), MoveRightGame.MoveRight));
+            events.Append(bKey, new RoomEvent(100, new PlayerId("p2"), MoveRightGame.MoveRight));
+
             Assert.True(snapshots.TryGetLatest(aKey, out var aSnapshot));
-            Assert.Equal(42, aSnapshot.Seed);
-            Assert.Single(events.Read(aKey));
-            _output.WriteLine("per-tenant DB isolation verified: tenant B's connection cannot read tenant A's room");
+            Assert.Equal(42, aSnapshot.Seed);          // A still sees ITS seed, not B's 7
+            Assert.Equal(7, aSnapshot.Tick);           // A's tick, not B's 99
+            Assert.Equal(new byte[] { 1, 2, 3 }, aSnapshot.State); // A's payload, not B's 9,9,9
+            Assert.Single(events.Read(aKey));          // A's one event, not B's two
+
+            Assert.True(snapshots.TryGetLatest(bKey, out var bSnapshot));
+            Assert.Equal(7, bSnapshot.Seed);           // B sees ITS seed, not A's 42
+            Assert.Equal(new byte[] { 9, 9, 9 }, bSnapshot.State);
+            Assert.Equal(2, events.Read(bKey).Count);
+
+            // Step 3 — raw row counts per database confirm each holds ONLY its own (one snapshot each,
+            // one vs two events) — no shared table served both tenants.
+            Assert.Equal(1, await CountRowsAsync(resolver, "tenant-a", "room_snapshots"));
+            Assert.Equal(1, await CountRowsAsync(resolver, "tenant-a", "room_events"));
+            Assert.Equal(1, await CountRowsAsync(resolver, "tenant-b", "room_snapshots"));
+            Assert.Equal(2, await CountRowsAsync(resolver, "tenant-b", "room_events"));
+            _output.WriteLine("per-tenant DB isolation verified: each tenant's connection reads ONLY its own database; raw row counts confirm no shared table");
+        }
+    }
+
+    [SkippableFact]
+    public async Task CrashAfterEvents_BeforeNewSnapshot_RecoversToCorrectState_ByReplay()
+    {
+        // ADVERSARIAL (partial-write / crash safety, ordering A): the snapshot and the event log are
+        // SEPARATE transactions (no 2-phase). Simulate a crash AFTER appending post-snapshot events but
+        // BEFORE the next checkpoint was written: only the OLD snapshot + the events are durable.
+        // Recovery must fold those events forward and land on the correct state — no loss, no double-apply.
+        var pg = await StartPostgresAsync();
+        await using (pg)
+        {
+            var resolver = await ProvisionTenantDatabasesAsync(pg, "tenant-a");
+            var factory = new TenantDbContextFactory(resolver);
+            factory.Migrate("tenant-a");
+            var snapshots = new PostgresSnapshotStore<RoomKey>(factory, KeyOf);
+            var events = new PostgresEventLog<RoomKey>(factory, KeyOf);
+
+            var room = new GameRoom(Arena.RoomId, new MoveRightGame(), new LogicalSimulationClock(), new SeededRandomSource(seed: 13));
+            room.Join(new PlayerId("p1"));
+            snapshots.Save(Arena, room.Snapshot()); // checkpoint @ tick 0
+
+            // Three ticks of moves are appended as events; the NEW snapshot is intentionally NOT saved
+            // (the crash happened before it). Durable state = old snapshot (tick 0) + 3 events.
+            for (var seq = 1; seq <= 3; seq++)
+            {
+                room.TryEnqueue(new PlayerId("p1"), MoveRightGame.MoveRight, seq);
+                foreach (var e in room.Tick().Events)
+                {
+                    events.Append(Arena, e);
+                }
+            }
+
+            // Fresh process recovers from the durable artifacts.
+            var fresh = new TenantDbContextFactory(resolver);
+            var recovery = new RoomRecoveryService(
+                new PostgresSnapshotStore<RoomKey>(fresh, KeyOf),
+                new PostgresEventLog<RoomKey>(fresh, KeyOf),
+                (rid, _) => new GameRoom(rid, new MoveRightGame(), new LogicalSimulationClock(), new SeededRandomSource(seed: 1)),
+                new AggregatingTelemetrySink());
+
+            var result = recovery.Restore(Arena, new GameId("demo"), MissingSnapshotPolicy.Fail);
+            Assert.Equal(RoomRecoveryOutcome.RestoredFromSnapshot, result.Outcome);
+            Assert.Equal(3, result.ReplayedEventCount); // all post-snapshot events folded forward
+            Assert.Equal(3, MoveRightGame.DecodeX(result.Room!.Project().Single().Payload));
+        }
+    }
+
+    [SkippableFact]
+    public async Task CrashAfterNewSnapshot_BeforeTruncatingOldEvents_RecoversWithoutDoubleApply()
+    {
+        // ADVERSARIAL (partial-write / crash safety, ordering B): a new checkpoint was written, but the
+        // crash happened BEFORE the now-folded events were truncated, so the log still holds events at
+        // ticks <= the new snapshot's tick. Recovery must NOT replay those (they are already in the
+        // snapshot) — it replays only events strictly newer than the checkpoint. The result must equal
+        // the true state, never a double-applied (inflated) position.
+        var pg = await StartPostgresAsync();
+        await using (pg)
+        {
+            var resolver = await ProvisionTenantDatabasesAsync(pg, "tenant-a");
+            var factory = new TenantDbContextFactory(resolver);
+            factory.Migrate("tenant-a");
+            var snapshots = new PostgresSnapshotStore<RoomKey>(factory, KeyOf);
+            var events = new PostgresEventLog<RoomKey>(factory, KeyOf);
+
+            var room = new GameRoom(Arena.RoomId, new MoveRightGame(), new LogicalSimulationClock(), new SeededRandomSource(seed: 13));
+            room.Join(new PlayerId("p1"));
+            snapshots.Save(Arena, room.Snapshot()); // baseline @ tick 0
+
+            // Tick 1..3: append events. The NEW snapshot IS saved (now reflects x=3 @ tick 3) but the
+            // old events at ticks 1..3 were NOT truncated before the crash — they remain in the log.
+            for (var seq = 1; seq <= 3; seq++)
+            {
+                room.TryEnqueue(new PlayerId("p1"), MoveRightGame.MoveRight, seq);
+                foreach (var e in room.Tick().Events)
+                {
+                    events.Append(Arena, e);
+                }
+            }
+
+            var checkpoint = room.Snapshot();
+            Assert.Equal(3, checkpoint.Tick);
+            snapshots.Save(Arena, checkpoint); // new checkpoint written...
+            // ...crash here, before TruncateThrough(tick 3). The 3 events at ticks 1..3 are still durable.
+            Assert.Equal(3, events.Read(Arena).Count);
+
+            var fresh = new TenantDbContextFactory(resolver);
+            var recovery = new RoomRecoveryService(
+                new PostgresSnapshotStore<RoomKey>(fresh, KeyOf),
+                new PostgresEventLog<RoomKey>(fresh, KeyOf),
+                (rid, _) => new GameRoom(rid, new MoveRightGame(), new LogicalSimulationClock(), new SeededRandomSource(seed: 1)),
+                new AggregatingTelemetrySink());
+
+            var result = recovery.Restore(Arena, new GameId("demo"), MissingSnapshotPolicy.Fail);
+            Assert.Equal(RoomRecoveryOutcome.RestoredFromSnapshot, result.Outcome);
+            // The 3 events are at ticks <= the snapshot tick (3), so NONE are replayed: no double-apply.
+            Assert.Equal(0, result.ReplayedEventCount);
+            Assert.Equal(3, MoveRightGame.DecodeX(result.Room!.Project().Single().Payload)); // correct, not 6
         }
     }
 
