@@ -4,10 +4,19 @@ using GameServer.Routing;
 
 namespace GameServer.Transport;
 
-/// <summary>One room's tick within a cycle: when it started (relative to cycle start) and how long it took.</summary>
-public sealed record RoomTickSample(RoomKey Room, double StartOffsetMs, double ElapsedMs)
+/// <summary>One room's tick within a cycle: when it started and ended, both relative to cycle start.</summary>
+/// <remarks>
+/// Start and end are stored as independent offsets from a single cycle origin rather than as
+/// start+duration. Reconstructing the end as <c>StartOffsetMs + ElapsedMs</c> sums two
+/// floating-point conversions, and that sum can round up past the next sample's
+/// single-conversion <c>StartOffsetMs</c> — producing a phantom sub-microsecond "overlap" that
+/// makes a strictly serial cycle report concurrency 2. Storing both endpoints as single
+/// conversions of monotonically ordered raw ticks keeps <c>EndOffsetMs(n) &lt;= StartOffsetMs(n+1)</c>
+/// exact for a sequential scheduler.
+/// </remarks>
+public sealed record RoomTickSample(RoomKey Room, double StartOffsetMs, double EndOffsetMs)
 {
-    public double EndOffsetMs => StartOffsetMs + ElapsedMs;
+    public double ElapsedMs => EndOffsetMs - StartOffsetMs;
 }
 
 /// <summary>
@@ -86,10 +95,11 @@ public sealed class SequentialRoomTickScheduler : IRoomTickScheduler
             cancellationToken.ThrowIfCancellationRequested();
             var start = Stopwatch.GetTimestamp();
             await tickRoom(room, cancellationToken).ConfigureAwait(false);
+            var end = Stopwatch.GetTimestamp();
             samples.Add(new RoomTickSample(
                 room,
                 Stopwatch.GetElapsedTime(cycleStart, start).TotalMilliseconds,
-                Stopwatch.GetElapsedTime(start).TotalMilliseconds));
+                Stopwatch.GetElapsedTime(cycleStart, end).TotalMilliseconds));
         }
 
         return new RoomTickCycleReport(rooms.Count, Stopwatch.GetElapsedTime(cycleStart).TotalMilliseconds, samples);
@@ -137,10 +147,11 @@ public sealed class ParallelRoomTickScheduler : IRoomTickScheduler
         {
             var start = Stopwatch.GetTimestamp();
             await tickRoom(room, token).ConfigureAwait(false);
+            var end = Stopwatch.GetTimestamp();
             samples.Add(new RoomTickSample(
                 room,
                 Stopwatch.GetElapsedTime(cycleStart, start).TotalMilliseconds,
-                Stopwatch.GetElapsedTime(start).TotalMilliseconds));
+                Stopwatch.GetElapsedTime(cycleStart, end).TotalMilliseconds));
         }).ConfigureAwait(false);
 
         return new RoomTickCycleReport(rooms.Count, Stopwatch.GetElapsedTime(cycleStart).TotalMilliseconds, samples.ToList());

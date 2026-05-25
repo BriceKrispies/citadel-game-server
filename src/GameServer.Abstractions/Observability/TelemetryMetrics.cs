@@ -34,6 +34,7 @@ public static class TelemetryEvents
     public const string ProtocolRejected = "protocol_rejected";
     public const string IdentityRejected = "identity_rejected";
     public const string SessionCreated = "session_created";
+    public const string CommandAccepted = "command_accepted";
     public const string RoomJoined = "room_joined";
     public const string RoomLeft = "room_left";
     public const string RoomTerminated = "room_terminated";

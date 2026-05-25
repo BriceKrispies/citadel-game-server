@@ -46,6 +46,12 @@ var maxRoomsPerNode = builder.Configuration.GetValue("Cluster:MaxRoomsPerNode", 
 // node to its absolute ceiling. 0 = fill to the ceiling (the prior behavior).
 var reservedHeadroom = builder.Configuration.GetValue("Cluster:ReservedHeadroom", 0);
 
+// Do not advertise the server implementation. The `Server: Kestrel` response banner is free
+// reconnaissance for an attacker (it names the stack and, across versions, narrows known-CVE
+// fingerprinting) and buys a legitimate client nothing. Suppressing it is defense-in-depth, not a
+// substitute for patching. Pinned by ServerHeaderSuppressedScenario.
+builder.WebHost.ConfigureKestrel(o => o.AddServerHeader = false);
+
 // Render enums (e.g. ReplicationPolicy modes) as readable strings in the HTTP API.
 builder.Services.ConfigureHttpJsonOptions(o => o.SerializerOptions.Converters.Add(new JsonStringEnumConverter()));
 
@@ -397,6 +403,12 @@ builder.Services.AddSingleton<MatchDirector>(sp => new MatchDirector(
     sp.GetRequiredService<Evaluator>(),
     sp.GetRequiredService<IRoomAllocator>(),
     sp.GetRequiredService<IMatchJoinTokenIssuer>()));
+// Retains each cycle's assignments by ticket id (TTL-bounded) so a player whose ticket was QUEUED on
+// submit and matched by a LATER cycle can still fetch its room+token via GET — closing the
+// lost-assignment gap where a 202 Location would otherwise 404 forever after the ticket is removed.
+var assignmentTtlSeconds = builder.Configuration.GetValue("Matchmaking:AssignmentTtlSeconds", 300.0);
+builder.Services.AddSingleton<AssignmentStore>(sp => new AssignmentStore(
+    sp.GetRequiredService<IMonotonicClock>(), assignmentTtlSeconds));
 
 // ---- Readiness contributors (real dependency probes for /ready) -------------
 // Each probe is a CHEAP invariant on a hot-path dependency, so /ready proves the node can actually
@@ -734,7 +746,7 @@ api.MapPost("/rooms/{roomId}/join-token",
 // tenant + the requested game + game version — baked in here, so a caller can never submit a ticket
 // for another tenant (Forbid enforces tenant access) and matchmaking only ever matches within scope.
 api.MapPost("/matchmaking/tickets",
-    (HttpContext ctx, MatchmakingTicketRequest request, TicketRegistry registry, MatchDirector director, IAuditLog audit, IClock clock) =>
+    (HttpContext ctx, MatchmakingTicketRequest request, TicketRegistry registry, MatchDirector director, AssignmentStore assignments, IAuditLog audit, IClock clock) =>
 {
     if (Forbid(ctx, request.TenantId, "submit-match-ticket", $"{request.TenantId}/{request.GameId}/{request.PlayerId}", audit, clock) is { } denied)
     {
@@ -747,24 +759,57 @@ api.MapPost("/matchmaking/tickets",
 
     // Run one cycle over THIS scope's tickets only (the registry buckets by scope — no cross-tenant leakage).
     var pool = new Pool("default", scope);
-    var assignments = director.Cycle(pool, registry.ActiveTickets(scope));
+    var cycle = director.Cycle(pool, registry.ActiveTickets(scope));
 
-    // Drop the tickets that were assigned this cycle so they are not re-matched.
-    foreach (var match in assignments)
+    // Drop the tickets that were assigned this cycle so they are not re-matched, and retain each player's
+    // assignment so a player matched in THIS cycle on an EARLIER submission can still fetch it by ticket id.
+    foreach (var match in cycle)
     {
         registry.Remove(scope, match.Players.Select(p => p.TicketId));
+        foreach (var player in match.Players)
+        {
+            assignments.Record(player);
+        }
     }
 
     Audit(ctx, "submit-match-ticket", $"{scope}/{request.PlayerId}", audit, clock, request.TenantId);
 
-    // If THIS player's ticket got assigned, hand back its room + token; otherwise it is queued.
-    var mine = assignments
+    // If THIS player's ticket got assigned, hand back its room + token; otherwise it is queued and the
+    // caller polls the (now real) fetch endpoint at the returned Location.
+    var mine = cycle
         .SelectMany(m => m.Players)
         .FirstOrDefault(p => p.TicketId == ticketId);
 
     return mine is null
         ? Results.Accepted($"/api/v1/matchmaking/tickets/{ticketId}", new { ticketId, status = "queued" })
         : Results.Ok(new JoinTokenContract(mine.JoinToken, scope.TenantId.Value, scope.GameId.Value, mine.RoomId.Value, mine.PlayerId.Value));
+});
+
+// Fetch a ticket's assignment (the Location returned by a queued 202). Returns the room+token once the
+// ticket has been matched — by THIS submission's cycle or a LATER one — or 404 while still queued (or once
+// the assignment's retention window has elapsed). The ticket id embeds the player id ("player:guid"), so a
+// caller is authorized for the tenant whose player it names; a caller may not fetch another tenant's
+// assignment. This closes the lost-assignment gap: a matched-but-not-self-submitting player can now claim
+// its token instead of polling a 404 forever.
+api.MapGet("/matchmaking/tickets/{ticketId}",
+    (HttpContext ctx, string ticketId, AssignmentStore assignments, IAuditLog audit, IClock clock) =>
+{
+    if (!assignments.TryGet(ticketId, out var assignment))
+    {
+        // Still queued or expired: not an error, just not yet assignable. No existence oracle either way.
+        return Results.NotFound(new ApiError("NotAssigned", "Ticket is not assigned (still queued, unknown, or expired)."));
+    }
+
+    // The assignment carries its own scope; authorize the caller for that tenant before revealing the token.
+    if (Forbid(ctx, assignment.Scope.TenantId.Value, "fetch-match-assignment", ticketId, audit, clock) is { } denied)
+    {
+        return denied;
+    }
+
+    Audit(ctx, "fetch-match-assignment", ticketId, audit, clock, assignment.Scope.TenantId.Value);
+    return Results.Ok(new JoinTokenContract(
+        assignment.JoinToken, assignment.Scope.TenantId.Value, assignment.Scope.GameId.Value,
+        assignment.RoomId.Value, assignment.PlayerId.Value));
 });
 
 api.MapPost("/sessions", (HttpContext ctx, CreateSessionRequest request, InMemorySessionRegistry sessions, IAuditLog audit, IClock clock) =>
@@ -915,6 +960,20 @@ api.MapPut("/admin/limits", (HttpContext ctx, AdmissionLimitsContract request, R
     if (ForbidPlatform(ctx, "update-limits", "*", audit, clock) is { } denied)
     {
         return denied;
+    }
+
+    // Reject degenerate ceilings BEFORE applying them. A zero or negative ceiling is not a meaningful
+    // capacity: e.g. MaxConnections <= 0 would make the admission counter compare `count >= 0` true on
+    // the very first connect and silently refuse ALL traffic — a self-inflicted outage from a fat-finger.
+    // A ceiling must be at least 1 (use int.MaxValue for "unbounded"). Audited as a rejected attempt.
+    if (request.MaxConnections < 1 || request.MaxConnectionsPerTenant < 1
+        || request.MaxRooms < 1 || request.MaxRoomsPerTenant < 1)
+    {
+        audit.Record(new AuditRecord(
+            ((CallerPrincipal)ctx.Items["caller"]!).CallerId, "update-limits", "*", clock.UtcNow, "rejected-invalid"));
+        return Results.Json(
+            new ApiError("InvalidLimits", "Every admission ceiling must be >= 1 (use a large value such as 2147483647 for unbounded)."),
+            statusCode: StatusCodes.Status400BadRequest);
     }
 
     server.UpdateAdmission(new AdmissionPolicy(

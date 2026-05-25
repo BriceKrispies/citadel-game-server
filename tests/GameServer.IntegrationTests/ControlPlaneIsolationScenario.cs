@@ -74,7 +74,17 @@ public sealed class ControlPlaneIsolationScenario
         var observeOther = await Client(host, GameAdminA).GetAsync("/api/v1/admin/rooms/tenant-b/some-room");
         Assert.Equal(HttpStatusCode.Forbidden, observeOther.StatusCode);
 
-        _output.WriteLine("no cross-tenant enumeration: list filtered, get/terminate/observe of another tenant => 403 (not 404)");
+        // tenant-a's caller REPLAYS a tenant-b room from durable artifacts: 403, NOT a 404 — authorize
+        // before reading any of tenant-b's snapshot/event data, so replay cannot be a cross-tenant
+        // recovery/exfiltration backdoor or an existence oracle.
+        var replayOther = await Client(host, GameAdminA).GetAsync("/api/v1/admin/rooms/tenant-b/some-room/replay");
+        Assert.Equal(HttpStatusCode.Forbidden, replayOther.StatusCode);
+
+        // tenant-a's caller attaches the live SSE observe stream for a tenant-b room: same 403.
+        var observeStreamOther = await Client(host, GameAdminA).GetAsync("/api/v1/admin/rooms/tenant-b/some-room/observe");
+        Assert.Equal(HttpStatusCode.Forbidden, observeStreamOther.StatusCode);
+
+        _output.WriteLine("no cross-tenant enumeration: list filtered, get/terminate/observe/replay/observe-stream of another tenant => 403 (not 404)");
     }
 
     [Fact]

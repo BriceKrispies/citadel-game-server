@@ -30,7 +30,9 @@ public sealed class GameVersionRecord
 }
 
 /// <summary>A durable room record. Captures which game (and version) a room runs so recovery knows
-/// how to interpret its snapshot/events.</summary>
+/// how to interpret its snapshot/events. RESERVED SCHEMA — NOT YET WIRED: no adapter writes the
+/// <c>rooms</c> table; the host serves room registration from the in-memory registry even under the
+/// Postgres backend. The table + migration exist for a future durable room registry.</summary>
 public sealed class RoomRecord
 {
     public string RoomId { get; set; } = string.Empty;
@@ -39,7 +41,10 @@ public sealed class RoomRecord
     public DateTimeOffset CreatedAt { get; set; }
 }
 
-/// <summary>A durable session record (player session lifecycle in this tenant).</summary>
+/// <summary>A durable session record (player session lifecycle in this tenant). RESERVED SCHEMA — NOT
+/// YET WIRED: no adapter writes the <c>sessions</c> table; the host serves session registration from the
+/// in-memory registry even under the Postgres backend. The table + migration exist for a future durable
+/// session registry.</summary>
 public sealed class SessionRecord
 {
     public string SessionId { get; set; } = string.Empty;

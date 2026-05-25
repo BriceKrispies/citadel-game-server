@@ -249,6 +249,15 @@ public sealed class RealtimeServer
     {
         var connection = new Connection(transport, principal);
 
+        // The connection's stable correlation id — the single thread that ties this connection's
+        // whole lifecycle together in structured logs/telemetry: connect → hello → join → command →
+        // fanout-on-its-command → error all carry it as the `correlationId` field. It is independent
+        // of the per-message `traceId` (which a client mints per request and the server echoes on the
+        // matching response): the correlation id is per-CONNECTION and server-owned, so a hostile or
+        // sloppy client cannot fragment or collide a session's trail. Seeded from the connection id
+        // (globally unique at the edge); adopted from the client's hello traceId only if it supplies a
+        // non-empty one, so a client that already has a request id can carry it through.
+
         // Admission control runs before anything else: a connection that cannot be
         // admitted is told so and dropped, before it can consume a session or a room.
         if (!TryAdmitConnection(principal.TenantId, out var reason))
@@ -260,7 +269,7 @@ public sealed class RealtimeServer
         }
 
         _telemetry.Increment(TelemetryMetrics.ConnectionsOpened);
-        _telemetry.Event(TelemetryEvents.ConnectionOpened, Tags(("connectionId", transport.ConnectionId.Value)));
+        _telemetry.Event(TelemetryEvents.ConnectionOpened, CorrelatedTags(connection));
 
         // Some transports answer pings and drop frames at the edge, so those never surface here as
         // inbound messages. They are still proof the client is alive; without this probe a client
@@ -301,8 +310,7 @@ public sealed class RealtimeServer
 
                     // Silent past the deadline (never said hello, or went quiet while established):
                     // a half-open/zombie connection. Reap it. Observable, never silent.
-                    _telemetry.Event(TelemetryEvents.ConnectionDropped, Tags(
-                        ("connectionId", transport.ConnectionId.Value),
+                    _telemetry.Event(TelemetryEvents.ConnectionDropped, CorrelatedTags(connection,
                         ("reason", connection.Session is null ? "handshake_timeout" : "idle_timeout")));
                     break;
                 }
@@ -792,8 +800,7 @@ public sealed class RealtimeServer
         // declare a tenant or game other than the one its token authorizes.
         if (inbound.TenantId.Value != connection.Principal.TenantId || inbound.GameId.Value != connection.Principal.GameId)
         {
-            _telemetry.Event(TelemetryEvents.IdentityRejected, Tags(
-                ("connectionId", connection.Id.Value),
+            _telemetry.Event(TelemetryEvents.IdentityRejected, CorrelatedTags(connection,
                 ("declaredTenant", inbound.TenantId.Value),
                 ("authorizedTenant", connection.Principal.TenantId)));
             await RejectAsync(connection, inbound, ServerErrorCode.Unauthorized,
@@ -806,7 +813,7 @@ public sealed class RealtimeServer
 
         if (!ProtocolVersions.IsSupported(inbound.ProtocolVersion))
         {
-            _telemetry.Event(TelemetryEvents.ProtocolRejected, Tags(("requested", inbound.ProtocolVersion.ToString())));
+            _telemetry.Event(TelemetryEvents.ProtocolRejected, CorrelatedTags(connection, ("requested", inbound.ProtocolVersion.ToString())));
             await RejectAsync(connection, inbound, ServerErrorCode.UnsupportedProtocolVersion,
                 $"Protocol version {inbound.ProtocolVersion} is not supported.", cancellationToken).ConfigureAwait(false);
             return;
@@ -814,7 +821,7 @@ public sealed class RealtimeServer
 
         if (!_tenants.TryResolve(inbound.TenantId, out var tenant))
         {
-            _telemetry.Event(TelemetryEvents.TenantRejected, Tags(("tenantId", inbound.TenantId.Value)));
+            _telemetry.Event(TelemetryEvents.TenantRejected, CorrelatedTags(connection, ("tenantId", inbound.TenantId.Value)));
             await RejectAsync(connection, inbound, ServerErrorCode.UnknownTenant,
                 $"Unknown tenant '{inbound.TenantId}'.", cancellationToken).ConfigureAwait(false);
             return;
@@ -822,7 +829,8 @@ public sealed class RealtimeServer
 
         var session = _router.CreateSession(tenant);
         connection.Session = session;
-        _telemetry.Event(TelemetryEvents.SessionCreated, Tags(("sessionId", session.Id.Value), ("tenantId", tenant.TenantId.Value)));
+        _telemetry.Event(TelemetryEvents.SessionCreated, CorrelatedTags(connection,
+            ("sessionId", session.Id.Value), ("tenantId", tenant.TenantId.Value)));
 
         var welcome = connection.BuildServerMessage(
             MessageType.ServerWelcome,
@@ -856,8 +864,7 @@ public sealed class RealtimeServer
         // a different player or into a room the token was not minted for.
         if (join.RoomId.Value != connection.Principal.RoomId || player.Value != connection.Principal.PlayerId)
         {
-            _telemetry.Event(TelemetryEvents.IdentityRejected, Tags(
-                ("connectionId", connection.Id.Value),
+            _telemetry.Event(TelemetryEvents.IdentityRejected, CorrelatedTags(connection,
                 ("declaredRoom", join.RoomId.Value),
                 ("declaredPlayer", player.Value),
                 ("authorizedRoom", connection.Principal.RoomId),
@@ -946,7 +953,7 @@ public sealed class RealtimeServer
         if (gameRefused)
         {
             // A definitive refusal by the game's rules (not retryable platform backpressure).
-            _telemetry.Event(TelemetryEvents.CommandRejected, Tags(
+            _telemetry.Event(TelemetryEvents.CommandRejected, CorrelatedTags(connection,
                 ("code", ServerErrorCode.NotJoined.ToString()), ("roomId", join.RoomId.Value), ("playerId", player.Value)));
             await RejectAsync(connection, inbound, ServerErrorCode.NotJoined,
                 "The game refused this join.", cancellationToken).ConfigureAwait(false);
@@ -961,7 +968,8 @@ public sealed class RealtimeServer
             return;
         }
 
-        _telemetry.Event(TelemetryEvents.RoomJoined, Tags(("roomId", join.RoomId.Value), ("playerId", player.Value)));
+        _telemetry.Event(TelemetryEvents.RoomJoined, CorrelatedTags(connection,
+            ("roomId", join.RoomId.Value), ("playerId", player.Value)));
 
         // Announce the join to the room as a discrete platform event. Emitted to this connection
         // so a just-joined client gets an immediate, observable lifecycle signal.
@@ -1111,6 +1119,12 @@ public sealed class RealtimeServer
         {
             case CommandAdmission.Accepted:
                 _telemetry.Increment(TelemetryMetrics.CommandsAccepted);
+                // The command leg of the correlation chain: an accepted intent is now an observable
+                // structured event (previously only a counter), tagged with the connection's correlationId
+                // and the request's traceId so connect → join → command is joinable end to end.
+                _telemetry.Event(TelemetryEvents.CommandAccepted, CorrelatedTags(connection,
+                    ("roomId", key.RoomId.Value), ("playerId", player.Value),
+                    ("sequence", inbound.Sequence.ToString()), ("traceId", inbound.TraceId)));
                 break;
             case CommandAdmission.RejectedStaleSequence:
                 await RejectAsync(connection, inbound, ServerErrorCode.StaleSequence,
@@ -1157,7 +1171,10 @@ public sealed class RealtimeServer
     {
         _telemetry.Increment(TelemetryMetrics.CommandsRejected, Tags(("code", code.ToString())));
         _telemetry.Increment(TelemetryMetrics.InvalidMessages, Tags(("messageType", inbound.MessageType.ToString())));
-        _telemetry.Event(TelemetryEvents.CommandRejected, Tags(("code", code.ToString()), ("traceId", inbound.TraceId)));
+        // The error leg of the correlation chain: carries the connection's stable correlationId AND the
+        // per-message traceId, so an operator can both follow the whole session and pinpoint the request.
+        _telemetry.Event(TelemetryEvents.CommandRejected, CorrelatedTags(connection,
+            ("code", code.ToString()), ("traceId", inbound.TraceId)));
 
         var error = connection.BuildServerMessage(MessageType.ServerError, new ServerError(code, message), inbound.TraceId);
         await SendAsync(connection, error, cancellationToken).ConfigureAwait(false);
@@ -1180,6 +1197,27 @@ public sealed class RealtimeServer
         return tags;
     }
 
+    /// <summary>
+    /// Builds telemetry tags stamped with the connection's stable <c>correlationId</c> (and its
+    /// <c>connectionId</c>), so every structured event for one connection is joinable by a single id
+    /// from connect through error. Use this for any event raised while handling a known connection.
+    /// </summary>
+    private static IReadOnlyDictionary<string, string> CorrelatedTags(
+        Connection connection, params (string Key, string Value)[] pairs)
+    {
+        var tags = new Dictionary<string, string>(pairs.Length + 2)
+        {
+            ["correlationId"] = connection.CorrelationId,
+            ["connectionId"] = connection.Id.Value,
+        };
+        foreach (var (key, value) in pairs)
+        {
+            tags[key] = value;
+        }
+
+        return tags;
+    }
+
     /// <summary>Per-connection state: identity, the resolved session, room placement, and the outbound sequence.</summary>
     private sealed class Connection
     {
@@ -1194,7 +1232,19 @@ public sealed class RealtimeServer
             Transport = transport;
             Principal = principal;
             Outbound = new BoundedOutboundChannel(transport, OutboundCapacity);
+            // Server-owned and stable for the connection's whole lifetime, fixed at connect (before any
+            // client frame). Seeded from the globally-unique connection id. Deliberately NOT derived from
+            // any client-supplied value, so a hostile/sloppy client cannot fragment or collide a session's
+            // trail. The client's per-request id travels separately as the per-message traceId.
+            CorrelationId = $"conn-{transport.ConnectionId.Value}";
         }
+
+        /// <summary>
+        /// The stable per-connection correlation id, attached to every structured event for this
+        /// connection so an operator can follow one connection's whole trail with one id, from the
+        /// connect event (before hello) through any error.
+        /// </summary>
+        public string CorrelationId { get; }
 
         public IServerPushTransport Transport { get; }
 

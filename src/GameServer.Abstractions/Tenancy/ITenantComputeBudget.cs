@@ -10,6 +10,15 @@ namespace GameServer.Tenancy;
 /// cycle, so an over-budget tenant's rooms yield and a quiet tenant's cheap room still ticks on
 /// cadence.
 /// </summary>
+/// <remarks>
+/// STATUS: NOT WIRED to the tick path. This port and its <c>FairTenantComputeBudget</c> implementation
+/// are built and unit-tested, but no composition root consults them when scheduling ticks (the tick
+/// driver ticks every active room each cycle regardless of tenant cost). It is therefore a dormant seam,
+/// not an active control — do not present per-tenant CPU fairness as a shipped capability. Wiring it
+/// requires reconciling tenant fairness with the Wave-6 invariant that the authoritative simulation is
+/// NEVER dropped: an "over budget" room must be DEFERRED within the cadence, never skipped. Tracked in
+/// tickets/FINAL-GAP-REPORT.md (Gap B).
+/// </remarks>
 public interface ITenantComputeBudget
 {
     /// <summary>

@@ -9,9 +9,17 @@ namespace GameServer.Persistence.Postgres;
 /// database-per-tenant isolation boundary in code form.
 /// </summary>
 /// <remarks>
-/// Durable records (per the platform's persistence rules): the tenant's games and their versions
-/// (the schema-version registry that a room snapshot's <c>GameSchemaVersion</c> references), rooms,
-/// sessions, an audit trail, and the room replay artifacts (latest snapshot + append-only events).
+/// Durable records (per the platform's persistence rules). WIRED today (an adapter reads/writes them
+/// when <c>Persistence:Backend=Postgres</c>): the tenant's <c>games</c> and <c>game_versions</c> (the
+/// schema-version registry a room snapshot's <c>GameSchemaVersion</c> references — see
+/// <c>PostgresGameRegistry</c>), the <c>audit_records</c> trail (<c>PostgresAuditLog</c>), and the room
+/// replay artifacts <c>room_snapshots</c> + <c>room_events</c> (<c>PostgresSnapshotStore</c> /
+/// <c>PostgresEventLog</c>).
+///
+/// NOT YET WIRED: the <c>rooms</c> and <c>sessions</c> tables (<see cref="RoomRecord"/> /
+/// <see cref="SessionRecord"/>). Their schema + migration exist, but the host still serves room and
+/// session registration from the in-memory registries even under the Postgres backend — there is no
+/// durable adapter writing these two tables yet. They are reserved schema, not a shipped capability.
 /// </remarks>
 public sealed class TenantDbContext : DbContext
 {

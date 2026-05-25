@@ -36,6 +36,21 @@ public sealed class RoomTickSchedulerTests
     }
 
     [Fact]
+    public async Task Sequential_NeverReportsPhantomConcurrency_ForManyTinyTicks()
+    {
+        // Regression for a sub-microsecond timing flake: when ticks are near-instant, the
+        // recorded sample intervals must never round into a phantom overlap. A strictly
+        // serial scheduler must report concurrency 1 for any tick body, no matter how short.
+        // 200 rooms of effectively-zero work is the worst case for endpoint rounding.
+        for (var attempt = 0; attempt < 20; attempt++)
+        {
+            var report = await new SequentialRoomTickScheduler().TickCycleAsync(Rooms(200), (_, _) => Task.CompletedTask);
+            Assert.Equal(1, report.MaxConcurrency);
+            Assert.Equal(200, report.Samples.Count);
+        }
+    }
+
+    [Fact]
     public async Task Sequential_PreservesEnumerationOrder()
     {
         var order = new List<string>();
@@ -120,12 +135,12 @@ public sealed class RoomTickSchedulerTests
     public void Report_MaxConcurrency_FromOverlappingIntervals()
     {
         var room = new RoomKey(new TenantId("t"), new RoomId("r"));
-        // Three intervals: [0,10], [5,15], [20,30] -> peak overlap of 2 (first two).
+        // Three intervals (start,end): [0,10], [5,15], [20,30] -> peak overlap of 2 (first two).
         var report = new RoomTickCycleReport(3, 30, new[]
         {
             new RoomTickSample(room, 0, 10),
-            new RoomTickSample(room, 5, 10),
-            new RoomTickSample(room, 20, 10),
+            new RoomTickSample(room, 5, 15),
+            new RoomTickSample(room, 20, 30),
         });
 
         Assert.Equal(2, report.MaxConcurrency);
@@ -135,12 +150,12 @@ public sealed class RoomTickSchedulerTests
     public void Report_AdjacentIntervals_DoNotCountAsConcurrent()
     {
         var room = new RoomKey(new TenantId("t"), new RoomId("r"));
-        // Back-to-back (sequential) ticks: [0,10], [10,20], [20,30] -> never overlap.
+        // Back-to-back (sequential) ticks (start,end): [0,10], [10,20], [20,30] -> never overlap.
         var report = new RoomTickCycleReport(3, 30, new[]
         {
             new RoomTickSample(room, 0, 10),
-            new RoomTickSample(room, 10, 10),
-            new RoomTickSample(room, 20, 10),
+            new RoomTickSample(room, 10, 20),
+            new RoomTickSample(room, 20, 30),
         });
 
         Assert.Equal(1, report.MaxConcurrency);

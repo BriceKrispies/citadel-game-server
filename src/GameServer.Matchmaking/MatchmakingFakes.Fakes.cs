@@ -14,7 +14,10 @@ public sealed class FakeRoomAllocator : IRoomAllocator
 
     public FakeRoomAllocator(bool atCapacity = false) => _atCapacity = atCapacity;
 
-    public List<(MatchScope Scope, RoomId Room)> Allocations { get; } = new();
+    // Concurrent: the double-assign race test shares one allocator across two directors running under
+    // Parallel.Invoke, so both may Allocate at the same instant. A plain List would corrupt or throw under
+    // that race (a latent test flake); a ConcurrentBag is safe and supports the Count/Contains the tests use.
+    public ConcurrentBag<(MatchScope Scope, RoomId Room)> Allocations { get; } = new();
 
     public RoomId? Allocate(MatchScope scope)
     {
