@@ -27,4 +27,11 @@ public sealed class CallerPrincipalTests
         Assert.True(admin.CanActFor("tenant-a"));
         Assert.True(admin.CanActFor("tenant-b"));
     }
+
+    [Fact]
+    public void IsPlatformAdmin_ReflectsTheRole()
+    {
+        Assert.True(Caller("tenant-a", CallerPrincipal.PlatformAdminRole).IsPlatformAdmin);
+        Assert.False(Caller("tenant-a").IsPlatformAdmin);
+    }
 }

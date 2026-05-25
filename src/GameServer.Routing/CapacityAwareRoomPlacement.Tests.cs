@@ -22,6 +22,40 @@ public sealed class CapacityAwareRoomPlacementTests
         new(directory, new[] { NodeA, NodeB }, maxRoomsPerNode);
 
     [Fact]
+    public void CapacityHeadroom_ReservedSlots_AreNotFilledByPlacement()
+    {
+        // Hard ceiling 5, but reserve 2 → each node is only filled to 3. The reserved slots stay free so a
+        // node can absorb shed/migrated rooms and ride out a burst without being driven to its ceiling.
+        var directory = new InMemoryRoomDirectory();
+        var placement = new CapacityAwareRoomPlacement(directory, new[] { NodeA, NodeB }, maxRoomsPerNode: 5, reservedHeadroom: 2);
+
+        var placed = 0;
+        for (var i = 0; i < 20; i++)
+        {
+            if (placement.Place(Room($"r{i}")).IsPlaced)
+            {
+                placed++;
+            }
+        }
+
+        // 2 nodes × (5 - 2 allocatable) = 6 placed; the rest report cluster-at-capacity even though the
+        // raw cap would allow 10. No node is filled past its allocatable ceiling.
+        Assert.Equal(6, placed);
+        Assert.Equal(3, directory.OwnedCount(NodeA));
+        Assert.Equal(3, directory.OwnedCount(NodeB));
+    }
+
+    [Theory]
+    [InlineData(-1)]
+    [InlineData(5)]   // == cap leaves zero allocatable
+    [InlineData(6)]   // > cap
+    public void ReservedHeadroom_OutOfRange_IsRejected(int reservedHeadroom)
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            new CapacityAwareRoomPlacement(new FakeRoomDirectory(), new[] { NodeA }, maxRoomsPerNode: 5, reservedHeadroom: reservedHeadroom));
+    }
+
+    [Fact]
     public void Place_IsIdempotentPerRoomKey()
     {
         var placement = Placement(new FakeRoomDirectory(), maxRoomsPerNode: 100);

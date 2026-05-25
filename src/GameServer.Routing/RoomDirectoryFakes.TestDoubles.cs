@@ -10,12 +10,18 @@ namespace GameServer.Routing;
 internal sealed class FakeRoomDirectory : IRoomDirectory
 {
     private readonly Dictionary<RoomKey, NodeId> _owners = new();
+    private readonly HashSet<NodeId> _draining = new();
 
     public bool TryClaim(RoomKey room, NodeId owner)
     {
         if (_owners.TryGetValue(room, out var existing))
         {
             return existing == owner; // already owned: idempotent for the holder, fenced for others
+        }
+
+        if (_draining.Contains(owner))
+        {
+            return false; // a draining node accepts no new rooms
         }
 
         _owners[room] = owner;
@@ -33,4 +39,21 @@ internal sealed class FakeRoomDirectory : IRoomDirectory
             _owners.Remove(room);
         }
     }
+
+    public void SetNodeDraining(NodeId node, bool draining)
+    {
+        if (draining)
+        {
+            _draining.Add(node);
+        }
+        else
+        {
+            _draining.Remove(node);
+        }
+    }
+
+    public bool IsNodeDraining(NodeId node) => _draining.Contains(node);
+
+    public IReadOnlyCollection<RoomKey> OwnedRooms(NodeId owner) =>
+        _owners.Where(e => e.Value.Equals(owner)).Select(e => e.Key).ToArray();
 }

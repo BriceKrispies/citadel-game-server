@@ -10,7 +10,14 @@ public sealed record CallerPrincipal(string CallerId, string TenantId, IReadOnly
 {
     public const string PlatformAdminRole = "platform-admin";
 
+    /// <summary>
+    /// True when this caller holds the platform-admin role. Platform-scoped operations that act on fleet
+    /// topology rather than one tenant's data (e.g. draining a node) gate on this, not on
+    /// <see cref="CanActFor"/> (which is tenant-scoped).
+    /// </summary>
+    public bool IsPlatformAdmin => Roles.Contains(PlatformAdminRole);
+
     /// <summary>True when this caller is allowed to act for <paramref name="tenantId"/>.</summary>
     public bool CanActFor(string tenantId) =>
-        Roles.Contains(PlatformAdminRole) || string.Equals(TenantId, tenantId, StringComparison.Ordinal);
+        IsPlatformAdmin || string.Equals(TenantId, tenantId, StringComparison.Ordinal);
 }

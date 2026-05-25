@@ -72,5 +72,14 @@ public sealed class ConnectionAffinityRoutingScenario
         public void Release(RoomKey room, NodeId owner)
         {
         }
+
+        public void SetNodeDraining(NodeId node, bool draining)
+        {
+        }
+
+        public bool IsNodeDraining(NodeId node) => false;
+
+        public IReadOnlyCollection<RoomKey> OwnedRooms(NodeId owner) =>
+            owner.Equals(_owner) ? new[] { _room } : Array.Empty<RoomKey>();
     }
 }

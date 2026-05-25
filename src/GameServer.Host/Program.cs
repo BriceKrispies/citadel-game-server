@@ -40,6 +40,10 @@ var fleetNodes = builder.Configuration.GetSection("Cluster:Nodes").Get<string[]>
     ? configuredNodes.Select(n => new NodeId(n)).ToArray()
     : new[] { localNode };
 var maxRoomsPerNode = builder.Configuration.GetValue("Cluster:MaxRoomsPerNode", 10_000);
+// Reserved headroom: placement fills a node only up to (MaxRoomsPerNode - ReservedHeadroom), keeping
+// spare slots free to absorb rooms shed from a draining peer and to ride out a burst without driving a
+// node to its absolute ceiling. 0 = fill to the ceiling (the prior behavior).
+var reservedHeadroom = builder.Configuration.GetValue("Cluster:ReservedHeadroom", 0);
 
 // Render enums (e.g. ReplicationPolicy modes) as readable strings in the HTTP API.
 builder.Services.ConfigureHttpJsonOptions(o => o.SerializerOptions.Converters.Add(new JsonStringEnumConverter()));
@@ -275,15 +279,19 @@ if (string.Equals(builder.Configuration["Cluster:Backend"], "Redis", StringCompa
     var redisOptions = new RedisClusterOptions();
     builder.Services.AddSingleton<IConnectionMultiplexer>(_ => ConnectionMultiplexer.Connect(redisConnection));
     builder.Services.AddSingleton<IRoomDirectory>(sp => new RedisRoomDirectory(sp.GetRequiredService<IConnectionMultiplexer>(), redisOptions));
-    builder.Services.AddSingleton<IRoomPlacement>(sp => new RedisRoomPlacement(sp.GetRequiredService<IConnectionMultiplexer>(), fleetNodes, maxRoomsPerNode, redisOptions));
+    builder.Services.AddSingleton<IRoomPlacement>(sp => new RedisRoomPlacement(sp.GetRequiredService<IConnectionMultiplexer>(), fleetNodes, maxRoomsPerNode, redisOptions, reservedHeadroom));
 }
 else
 {
     builder.Services.AddSingleton<IRoomDirectory, InMemoryRoomDirectory>();
-    builder.Services.AddSingleton<IRoomPlacement>(sp => new CapacityAwareRoomPlacement(sp.GetRequiredService<IRoomDirectory>(), fleetNodes, maxRoomsPerNode));
+    builder.Services.AddSingleton<IRoomPlacement>(sp => new CapacityAwareRoomPlacement(sp.GetRequiredService<IRoomDirectory>(), fleetNodes, maxRoomsPerNode, reservedHeadroom));
 }
 
 builder.Services.AddSingleton<IRoomAffinityRouter>(sp => new DirectoryRoomAffinityRouter(sp.GetRequiredService<IRoomDirectory>(), localNode));
+// Drains a node cleanly: marks it draining (fleet-visible) and sheds each room it owns onto a live node
+// via the same capacity-aware placement, with no room stranded or double-owned (see NodeDrainCoordinator).
+builder.Services.AddSingleton<NodeDrainCoordinator>(sp => new NodeDrainCoordinator(
+    sp.GetRequiredService<IRoomDirectory>(), sp.GetRequiredService<IRoomPlacement>()));
 
 // Renew this node's room-ownership leases while it serves them, well inside the lease window, so a
 // distributed lease never lapses under a live room (which would let another node claim it — split
@@ -546,6 +554,42 @@ api.MapGet("/admin/rooms", (HttpContext ctx, RealtimeServer server, RoomScopedMe
 
     Audit(ctx, "admin-list-rooms", "*", audit, clock);
     return Results.Ok(new { rooms, hottest });
+});
+
+// Drain a node: a PLATFORM-ADMIN operation (it acts on fleet topology, not one tenant's data). The node
+// is marked draining (refuses new allocations, fleet-visible via the directory) and every room it owns is
+// re-placed onto a live node — no room stranded or double-owned (the move is atomic in the directory).
+// Authenticated by the group filter; restricted to platform admins; audited. Rooms the cluster has no
+// live capacity to take are reported (clusterAtCapacity) and left owned by the draining node, not lost.
+api.MapPost("/admin/nodes/{nodeId}/drain", (HttpContext ctx, string nodeId, NodeDrainCoordinator drainer, IAuditLog audit, IClock clock) =>
+{
+    var caller = (CallerPrincipal)ctx.Items["caller"]!;
+    if (!caller.IsPlatformAdmin)
+    {
+        audit.Record(new AuditRecord(caller.CallerId, "drain-node", nodeId, clock.UtcNow, "denied"));
+        return Results.Json(
+            new ApiError("Forbidden", "Draining a node is a platform-admin operation."),
+            statusCode: StatusCodes.Status403Forbidden);
+    }
+
+    var outcomes = drainer.Drain(new NodeId(nodeId));
+    var shed = outcomes.Where(o => o.Result.IsPlaced)
+        .Select(o => new { room = $"{o.Room.TenantId.Value}/{o.Room.RoomId.Value}", newOwner = o.Result.Owner.Value })
+        .ToArray();
+    var stranded = outcomes.Where(o => !o.Result.IsPlaced)
+        .Select(o => $"{o.Room.TenantId.Value}/{o.Room.RoomId.Value}")
+        .ToArray();
+
+    Audit(ctx, "drain-node", nodeId, audit, clock);
+    return Results.Ok(new
+    {
+        node = nodeId,
+        draining = true,
+        shedCount = shed.Length,
+        shed,
+        // Rooms left on the draining node because no live node had capacity — surfaced, not dropped.
+        clusterAtCapacity = stranded,
+    });
 });
 
 api.MapGet("/admin/rooms/{tenantId}/{roomId}", (HttpContext ctx, string tenantId, string roomId, RealtimeServer server, IAuditLog audit, IClock clock) =>

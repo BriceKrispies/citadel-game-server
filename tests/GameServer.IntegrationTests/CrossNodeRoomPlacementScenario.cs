@@ -80,6 +80,15 @@ public sealed class CrossNodeRoomPlacementScenario
                 _owners.Remove(room);
             }
         }
+
+        public void SetNodeDraining(NodeId node, bool draining)
+        {
+        }
+
+        public bool IsNodeDraining(NodeId node) => false;
+
+        public IReadOnlyCollection<RoomKey> OwnedRooms(NodeId owner) =>
+            _owners.Where(e => e.Value.Equals(owner)).Select(e => e.Key).ToArray();
     }
 
     private static int ReadX(IntegrationHarness node, RoomKey key, string player)

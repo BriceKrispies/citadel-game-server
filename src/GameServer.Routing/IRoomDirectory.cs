@@ -42,4 +42,21 @@ public interface IRoomDirectory
 
     /// <summary>Releases <paramref name="room"/> if <paramref name="owner"/> currently holds it; otherwise a no-op.</summary>
     void Release(RoomKey room, NodeId owner);
+
+    /// <summary>
+    /// Marks <paramref name="node"/> as draining (<paramref name="draining"/> = true) or active again.
+    /// A draining node is removed from the placement pool — it accepts no new allocations — so the drain
+    /// decision is fleet-visible (every node's placement reads it from the shared directory), not local
+    /// to one process. Idempotent.
+    /// </summary>
+    void SetNodeDraining(NodeId node, bool draining);
+
+    /// <summary>True if <paramref name="node"/> is currently draining (refusing new allocations).</summary>
+    bool IsNodeDraining(NodeId node);
+
+    /// <summary>
+    /// The rooms <paramref name="owner"/> currently owns. A draining node enumerates these to shed each
+    /// one (release it so it re-places on a live node). Ordering is unspecified.
+    /// </summary>
+    IReadOnlyCollection<RoomKey> OwnedRooms(NodeId owner);
 }

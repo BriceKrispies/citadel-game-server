@@ -16,8 +16,21 @@ namespace GameServer.Routing;
 public sealed class InMemoryRoomDirectory : IRoomDirectory
 {
     private readonly ConcurrentDictionary<RoomKey, NodeId> _owners = new();
+    private readonly ConcurrentDictionary<NodeId, byte> _draining = new();
 
-    public bool TryClaim(RoomKey room, NodeId owner) => _owners.GetOrAdd(room, owner).Equals(owner);
+    // A claim is refused on a draining node so its slots are not re-filled while it sheds. The check is
+    // part of the same GetOrAdd path so a node entering drain cannot win a concurrent first-claim.
+    public bool TryClaim(RoomKey room, NodeId owner)
+    {
+        if (_draining.ContainsKey(owner) && (!_owners.TryGetValue(room, out var existing) || !existing.Equals(owner)))
+        {
+            // Draining node: refuse to take a NEW room. Renewing a room it already owns stays allowed so a
+            // mid-drain lease does not lapse before the room is shed (no stranded/double-owned room).
+            return false;
+        }
+
+        return _owners.GetOrAdd(room, owner).Equals(owner);
+    }
 
     public bool TryGetOwner(RoomKey room, out NodeId owner) => _owners.TryGetValue(room, out owner);
 
@@ -38,4 +51,32 @@ public sealed class InMemoryRoomDirectory : IRoomDirectory
     public void Release(RoomKey room, NodeId owner) =>
         // Removes only if the room is still owned by exactly this owner (atomic compare-and-remove).
         ((ICollection<KeyValuePair<RoomKey, NodeId>>)_owners).Remove(new KeyValuePair<RoomKey, NodeId>(room, owner));
+
+    public void SetNodeDraining(NodeId node, bool draining)
+    {
+        if (draining)
+        {
+            _draining[node] = 0;
+        }
+        else
+        {
+            _draining.TryRemove(node, out _);
+        }
+    }
+
+    public bool IsNodeDraining(NodeId node) => _draining.ContainsKey(node);
+
+    public IReadOnlyCollection<RoomKey> OwnedRooms(NodeId owner)
+    {
+        var rooms = new List<RoomKey>();
+        foreach (var entry in _owners)
+        {
+            if (entry.Value.Equals(owner))
+            {
+                rooms.Add(entry.Key);
+            }
+        }
+
+        return rooms;
+    }
 }
