@@ -128,3 +128,7 @@ must never depend on ASP.NET Core, WebSockets, HTTP, AWS, Redis, databases, or
 wall-clock time. All time comes from an injected `ISimulationClock`; all
 randomness from an injected `IRandomSource`. If a change would make Simulation
 depend on infrastructure, stop and introduce a better abstraction instead.
+
+## License
+
+Released under the [MIT License](LICENSE).
