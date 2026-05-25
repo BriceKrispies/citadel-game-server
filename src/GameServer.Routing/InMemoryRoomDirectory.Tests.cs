@@ -57,6 +57,25 @@ public sealed class InMemoryRoomDirectoryTests
     }
 
     [Fact]
+    public void Renew_RefreshesOnlyForTheCurrentOwner_AndNeverAcquires()
+    {
+        // TryRenew confirms an existing lease but must NEVER acquire — this is the contract that stops a
+        // returning partitioned owner's renewal worker from resurrecting ownership it has lost.
+        var directory = new InMemoryRoomDirectory();
+        var nodeA = new NodeId("node-A");
+        var nodeB = new NodeId("node-B");
+        var room = Room("arena");
+
+        Assert.False(directory.TryRenew(room, nodeA));   // unowned: renewal acquires nothing
+        Assert.False(directory.TryGetOwner(room, out _)); // still unowned after a renewal attempt
+
+        directory.TryClaim(room, nodeA);
+        Assert.True(directory.TryRenew(room, nodeA));     // the current owner may renew
+        Assert.False(directory.TryRenew(room, nodeB));    // a non-owner may not renew (no steal)
+        Assert.True(directory.TryGetOwner(room, out var owner) && owner.Equals(nodeA)); // ownership unchanged
+    }
+
+    [Fact]
     public void Claim_UnderConcurrency_HasExactlyOneWinner()
     {
         // Many nodes race to claim the SAME room at once. The fence must admit exactly one — the

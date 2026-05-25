@@ -7,10 +7,13 @@ namespace GameServer.Host;
 /// Keeps this node's room-ownership leases alive. A distributed directory (Redis) leases ownership for
 /// a bounded window; without renewal the lease lapses while a room is still being served and another
 /// node could then claim it — the split brain the directory exists to prevent. On a cadence well inside
-/// the lease, this re-claims every room the node is actively serving (<see cref="RealtimeServer.ActiveRooms"/>);
-/// re-claiming for the current owner refreshes the lease, and re-claiming a room owned by another node
-/// is a no-op (the fence rejects it). For the in-memory directory (no expiry) this is a cheap idempotent
-/// no-op. Runs as a supervised worker, so a transient directory fault is restarted rather than fatal.
+/// the lease, this RENEWS (not re-claims) every room the node is actively serving
+/// (<see cref="RealtimeServer.ActiveRooms"/>) via <see cref="IRoomDirectory.TryRenew"/>: it refreshes the
+/// lease only while this node is still the owner, and acquires NOTHING when the room has been taken over.
+/// Using renew rather than claim is deliberate — if this node was partitioned and lost a room, its renewal
+/// must not resurrect ownership the instant the new owner's lease has a gap (which would co-own the room).
+/// For the in-memory directory (no expiry) this is a cheap idempotent no-op. Runs as a supervised worker,
+/// so a transient directory fault is restarted rather than fatal.
 /// </summary>
 public sealed class RoomLeaseRenewalService : ISupervisedWorker
 {
@@ -46,8 +49,10 @@ public sealed class RoomLeaseRenewalService : ISupervisedWorker
             {
                 try
                 {
-                    // Refreshes the lease for the current owner; a no-op if another node owns it.
-                    _directory.TryClaim(room, _localNode);
+                    // RENEW (not claim): refreshes the lease only while this node is still the owner. If the
+                    // node was partitioned and another node took the room over, this returns false and does
+                    // NOT re-acquire it — re-acquisition would resurrect ownership and split-brain the room.
+                    _directory.TryRenew(room, _localNode);
                 }
                 catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
                 {

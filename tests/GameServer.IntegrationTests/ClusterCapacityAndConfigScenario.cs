@@ -37,6 +37,36 @@ public sealed class ClusterCapacityAndConfigScenario
     }
 
     [Fact]
+    public async Task DrainNodeEndpoint_RequiresPlatformAdmin_NonAdminIs403_AdminSucceeds()
+    {
+        // The drain endpoint acts on fleet topology, so it is platform-admin only. Prove the authz gate:
+        // unauthenticated -> 401 (group filter), a tenant-scoped non-admin -> 403, a platform admin -> 200.
+        using var host = new WebApplicationFactory<Program>();
+        var anon = host.CreateClient();
+        var tenantOperator = host.CreateClient();
+        tenantOperator.DefaultRequestHeaders.Authorization = new("Bearer", "dev-tenant-a-key"); // no roles
+        var admin = host.CreateClient();
+        admin.DefaultRequestHeaders.Authorization = new("Bearer", "dev-admin-key"); // platform-admin
+
+        var node = Uri.EscapeDataString("http://localhost:5000");
+
+        var unauth = await anon.PostAsync($"/api/v1/admin/nodes/{node}/drain", content: null);
+        Assert.Equal(HttpStatusCode.Unauthorized, unauth.StatusCode);
+
+        var forbidden = await tenantOperator.PostAsync($"/api/v1/admin/nodes/{node}/drain", content: null);
+        Assert.Equal(HttpStatusCode.Forbidden, forbidden.StatusCode);
+        var error = await forbidden.Content.ReadFromJsonAsync<ApiErrorDto>();
+        Assert.Equal("Forbidden", error!.Code);
+
+        var ok = await admin.PostAsync($"/api/v1/admin/nodes/{node}/drain", content: null);
+        Assert.Equal(HttpStatusCode.OK, ok.StatusCode);
+        var body = await ok.Content.ReadFromJsonAsync<DrainResponseDto>();
+        Assert.True(body!.Draining);
+
+        _output.WriteLine($"drain authz: anon=401, tenant-operator=403, platform-admin=200 (draining={body.Draining})");
+    }
+
+    [Fact]
     public void RedisBackend_WithoutConnectionString_FailsFastAtStartup()
     {
         // Selecting the Redis backend with no connection string is a misconfiguration the node must
@@ -51,4 +81,6 @@ public sealed class ClusterCapacityAndConfigScenario
     }
 
     private sealed record ApiErrorDto(string Code, string Message);
+
+    private sealed record DrainResponseDto(string Node, bool Draining, int ShedCount);
 }

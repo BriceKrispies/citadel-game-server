@@ -32,6 +32,13 @@ public sealed class InMemoryRoomDirectory : IRoomDirectory
         return _owners.GetOrAdd(room, owner).Equals(owner);
     }
 
+    // Renew refreshes an EXISTING lease only. The in-memory lease is effectively infinite, so renewal is a
+    // no-op beyond confirming the caller is still the owner — but, critically, it NEVER acquires: a node
+    // that lost the room (another node owns it, or it is unowned) gets false and does not re-take it. That
+    // is what stops a returning partitioned owner from resurrecting ownership through its renewal worker.
+    public bool TryRenew(RoomKey room, NodeId owner) =>
+        _owners.TryGetValue(room, out var existing) && existing.Equals(owner);
+
     public bool TryGetOwner(RoomKey room, out NodeId owner) => _owners.TryGetValue(room, out owner);
 
     public int OwnedCount(NodeId owner)

@@ -69,6 +69,9 @@ public sealed class CrossNodeRoomPlacementScenario
             return true;
         }
 
+        public bool TryRenew(RoomKey room, NodeId owner) =>
+            _owners.TryGetValue(room, out var existing) && existing == owner;
+
         public bool TryGetOwner(RoomKey room, out NodeId owner) => _owners.TryGetValue(room, out owner);
 
         public int OwnedCount(NodeId owner) => _owners.Values.Count(o => o.Equals(owner));

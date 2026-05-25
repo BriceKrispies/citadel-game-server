@@ -82,6 +82,22 @@ if cur == false then
 end
 return 0";
 
+    // Renew-only: refresh the lease ONLY when this node is the current owner. Unlike ClaimScript there is
+    // NO acquire-when-unowned branch — a node that lost the room (key expired and another node took it, or
+    // it is simply gone) must NOT re-take it through renewal. That closes the split-brain vector where a
+    // returning partitioned owner resurrects ownership the instant the new owner's lease has any gap; the
+    // only legitimate (re)acquisition path is placement/affinity, not the lease-renewal worker.
+    private const string RenewScript = @"
+local t = redis.call('TIME')
+local now = (tonumber(t[1]) * 1000) + math.floor(tonumber(t[2]) / 1000)
+redis.call('ZREMRANGEBYSCORE', KEYS[2], '-inf', '(' .. now)
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+  redis.call('SET', KEYS[1], ARGV[1], 'PX', tonumber(ARGV[2]))
+  redis.call('ZADD', KEYS[2], now + tonumber(ARGV[2]), ARGV[3])
+  return 1
+end
+return 0";
+
     // Drop expired members first so the count is exactly the live (un-expired) claims and the set
     // cannot grow without bound.
     private const string CountScript = @"
@@ -115,6 +131,19 @@ return 1";
                 RedisClusterKeys.OwnerKey(_options.KeyPrefix, room),
                 RedisClusterKeys.NodeRooms(_options.KeyPrefix, owner),
                 RedisClusterKeys.NodeDraining(_options.KeyPrefix, owner),
+            },
+            new RedisValue[] { owner.Value, _options.LeaseMs, RedisClusterKeys.Member(room) });
+        return (long)result == 1;
+    }
+
+    public bool TryRenew(RoomKey room, NodeId owner)
+    {
+        var result = _db.ScriptEvaluate(
+            RenewScript,
+            new[]
+            {
+                RedisClusterKeys.OwnerKey(_options.KeyPrefix, room),
+                RedisClusterKeys.NodeRooms(_options.KeyPrefix, owner),
             },
             new RedisValue[] { owner.Value, _options.LeaseMs, RedisClusterKeys.Member(room) });
         return (long)result == 1;

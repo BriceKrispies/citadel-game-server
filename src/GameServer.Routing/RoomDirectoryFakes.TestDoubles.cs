@@ -28,6 +28,10 @@ internal sealed class FakeRoomDirectory : IRoomDirectory
         return true;
     }
 
+    // Renew-only: confirms the caller is still the owner; never acquires (mirrors the production contract).
+    public bool TryRenew(RoomKey room, NodeId owner) =>
+        _owners.TryGetValue(room, out var existing) && existing.Equals(owner);
+
     public bool TryGetOwner(RoomKey room, out NodeId owner) => _owners.TryGetValue(room, out owner);
 
     public int OwnedCount(NodeId owner) => _owners.Values.Count(o => o.Equals(owner));

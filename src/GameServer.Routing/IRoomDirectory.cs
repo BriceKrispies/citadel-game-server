@@ -34,6 +34,17 @@ public interface IRoomDirectory
     /// </summary>
     bool TryClaim(RoomKey room, NodeId owner);
 
+    /// <summary>
+    /// Renews <paramref name="owner"/>'s lease on <paramref name="room"/>: refreshes the lease ONLY if
+    /// <paramref name="owner"/> is the current holder, and returns true in that case. Returns false — and
+    /// acquires nothing — when the room is unowned or owned by a different node. This is deliberately NOT
+    /// <see cref="TryClaim"/>: a lease-renewal worker must keep an EXISTING lease alive, never re-acquire a
+    /// room it has lost. If a node was partitioned and another node took the room over, that node's renewal
+    /// must fail here rather than resurrect ownership the instant the new owner's lease has any gap — which
+    /// would split-brain the room. Re-acquisition is the job of placement/affinity, not renewal.
+    /// </summary>
+    bool TryRenew(RoomKey room, NodeId owner);
+
     /// <summary>Returns the current owner of <paramref name="room"/>, if any node owns it.</summary>
     bool TryGetOwner(RoomKey room, out NodeId owner);
 

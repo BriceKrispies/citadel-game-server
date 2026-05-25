@@ -83,6 +83,15 @@ public sealed class RedisRoomDirectoryScenario
             Assert.True(fromNodeA.TryClaim(renewRoom, nodeA));        // renewal keeps ownership
             Assert.False(fromNodeB.TryClaim(renewRoom, nodeB));       // still fenced after renewal
 
+            // TryRenew is renew-only: the owner refreshes, a non-owner gets false WITHOUT acquiring, and a
+            // renewal against an UNOWNED room acquires nothing (the split-brain-after-partition guard).
+            Assert.True(fromNodeA.TryRenew(renewRoom, nodeA));        // current owner renews
+            Assert.False(fromNodeB.TryRenew(renewRoom, nodeB));       // non-owner cannot renew (no steal)
+            Assert.True(fromNodeA.TryGetOwner(renewRoom, out var stillA) && stillA.Equals(nodeA));
+            var unownedRoom = new RoomKey(new TenantId("tenant-a"), new RoomId("never-claimed"));
+            Assert.False(fromNodeB.TryRenew(unownedRoom, nodeB));     // renewal does NOT acquire an unowned room
+            Assert.False(fromNodeB.TryGetOwner(unownedRoom, out _));  // still unowned
+
             _output.WriteLine($"redis cluster verified: arena owner={owner.Value}; r1={p1.Owner.Value}, r2={p2.Owner.Value}, r3=full");
         }
     }

@@ -61,6 +61,8 @@ public sealed class ConnectionAffinityRoutingScenario
 
         public bool TryClaim(RoomKey room, NodeId owner) => true;
 
+        public bool TryRenew(RoomKey room, NodeId owner) => room == _room && owner.Equals(_owner);
+
         public bool TryGetOwner(RoomKey room, out NodeId owner)
         {
             owner = _owner;
