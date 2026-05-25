@@ -37,6 +37,20 @@ public sealed class TenantScopedMetricsTests
     }
 
     [Fact]
+    public void SatisfiesTheEdgePort_RecordingThroughITenantMetricsSink()
+    {
+        // The realtime edge feeds per-tenant volume through the rank-0 ITenantMetricsSink port;
+        // the production aggregator must be substitutable for it (Liskov) so the wiring at the
+        // composition root is honest.
+        ITenantMetricsSink sink = new TenantScopedMetrics();
+        sink.Record("tenant-a", TelemetryMetrics.MessagesIn, 7);
+
+        var stat = ((TenantScopedMetrics)sink).Ranked(TelemetryMetrics.MessagesIn, 1).Single();
+        Assert.Equal("tenant-a", stat.Tenant);
+        Assert.Equal(7, stat.Total);
+    }
+
+    [Fact]
     public void Ranked_ForUnseenMetric_IsEmpty()
     {
         var metrics = new TenantScopedMetrics();

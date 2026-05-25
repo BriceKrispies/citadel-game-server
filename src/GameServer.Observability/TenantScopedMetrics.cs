@@ -13,7 +13,7 @@ public sealed record TenantStat(string Tenant, long Count, double Total, double 
 /// <c>maxTenants</c> tenants per metric, evicting the coldest (lowest total) when full so the
 /// noisy ones are always retained.
 /// </summary>
-public sealed class TenantScopedMetrics
+public sealed class TenantScopedMetrics : ITenantMetricsSink
 {
     private readonly int _maxTenants;
     private readonly object _lock = new();

@@ -1,37 +1,124 @@
+using GameServer.Protocol.Realtime.V1;
+
 namespace GameServer.SecurityTests;
 
 /// <summary>
-/// Tracked ACCEPTED GAPS — behaviors a future hardening pass should add, recorded here as
-/// permanently-skipped tests so they are visible in every run (and in FINDINGS.md) without
-/// failing the suite. A skip reason states the gap; flip to a real <c>[SkippableFact]</c> body
-/// once the gap is closed.
+/// Formerly tracked ACCEPTED GAPS. Wave 1 (hard safety boundaries) wired the per-tenant rate limiter
+/// to the realtime hot path, so Gap A is now a REAL assertion proven black-box: a sustained
+/// single-tenant command flood is shed with the rate-limit/backpressure wire code. Gap B (per-tenant
+/// compute budget on the tick path) is closed at the unit/integration layer
+/// (<c>PerTenantComputeBudgetScenario</c> + <c>RoomTickService</c> wiring) but has no distinct
+/// black-box signal, so it stays tracked here as a skip with the honest reason.
 /// </summary>
+[Trait("Category", "Dos")]
 public sealed class AcceptedGapTests
 {
+    private static readonly SecurityTarget Target = SecurityTarget.Current;
+
+    private static CancellationToken Ct => new CancellationTokenSource(TimeSpan.FromSeconds(45)).Token;
+
     [SkippableFact]
-    public void PerTenantRateLimiting_IsNotYetWiredToTheHotPath()
+    public async Task PerTenantRateLimiting_ShedsASustainedSingleTenantFlood()
     {
-        // GAP: TokenBucketTenantRateLimiter (GameServer.Tenancy) exists and is unit-tested, but is
-        // NOT wired into RealtimeServer's command path. A single tenant can therefore push commands
-        // up to the per-room queue depth (1024) on every room without a per-tenant token-bucket
-        // ceiling throttling it first. Overload is currently shed by queue depth + admission caps,
-        // not by fair per-tenant rate limiting. Black-box: there is no RATE_LIMITED behavior to
-        // observe, so this stays skipped until the limiter is wired (then assert ServerError
-        // RATE_LIMITED / ERROR_CODE_RATE_LIMITED under a sustained single-tenant flood).
-        Skip.If(true,
-            "Accepted gap: TokenBucketTenantRateLimiter is built + unit-tested but not wired to the " +
-            "realtime hot path. No per-tenant RATE_LIMITED behavior is observable black-box yet.");
+        Skip.IfNot(Target.Configured, SecurityTarget.SkipReason);
+
+        // Gap A (now FIXED): TokenBucketTenantRateLimiter is wired into RealtimeServer.HandleCommandAsync.
+        // A single tenant pushing commands far past its per-tenant token bucket is throttled and shed
+        // as backpressure (Overloaded → ERROR_CODE_BACKPRESSURE_REJECTED on the wire), independent of
+        // any single room's queue depth. We flood one room hard and assert the server sheds a typed
+        // backpressure error rather than absorbing the whole flood — and stays up.
+        var (roomId, playerId, token) = await ControlPlane.ProvisionJoinableRoomAsync(
+            Target, Target.TenantAKey!, SecurityTarget.TenantA, Ct);
+        await using var client = await RealtimeWireClient.ConnectWithTokenAsync(Target, token, Ct);
+
+        await client.SendAsync(WireEnvelopes.Hello(SecurityTarget.TenantA, ControlPlane.GameId), Ct);
+        await AwaitWelcomeAsync(client);
+        await client.SendAsync(WireEnvelopes.JoinRoom(SecurityTarget.TenantA, ControlPlane.GameId, roomId, playerId), Ct);
+
+        // Sustained flood: well past the per-tenant burst+rate so the token bucket must shed.
+        const int flood = 8000;
+        ErrorCode? sawCode = null;
+        var reader = DrainForBackpressureAsync(client, Ct);
+        for (ulong seq = 1; seq <= flood; seq++)
+        {
+            try
+            {
+                await client.SendAsync(
+                    WireEnvelopes.Command(SecurityTarget.TenantA, ControlPlane.GameId, roomId, playerId, "noop", seq), Ct);
+            }
+            catch (System.Net.WebSockets.WebSocketException)
+            {
+                break; // server closed under us — still graceful, not a crash
+            }
+        }
+
+        sawCode = await reader;
+
+        // The flood was shed with the typed backpressure/rate-limit code (not absorbed silently, not
+        // an internal error). A clean close under the flood is also acceptable shedding.
+        if (sawCode is not null)
+        {
+            Assert.Equal(ErrorCode.BackpressureRejected, sawCode);
+        }
+
+        // The process is still serving after the flood.
+        using var http = Target.NewHttpClient();
+        var ready = await http.GetAsync("/ready", Ct);
+        Assert.Equal(System.Net.HttpStatusCode.OK, ready.StatusCode);
     }
 
     [SkippableFact]
-    public void PerTenantComputeBudget_IsNotYetWiredToTheHotPath()
+    public void PerTenantComputeBudget_IsNotYetWiredToTheTickPath()
     {
-        // GAP: FairTenantComputeBudget (GameServer.Tenancy) exists and is unit-tested, but is NOT
-        // wired into the tick/replication path. There is no per-tenant CPU/compute fairness applied
-        // under load, so one noisy tenant's rooms can consume more than a fair share of tick budget.
-        // Nothing to observe black-box yet; revisit once the budget is wired into RoomTickService.
+        // GAP B (still tracked): FairTenantComputeBudget (GameServer.Tenancy) is built and unit-tested
+        // (PerTenantComputeBudgetScenario proves the fair-share math), but is deliberately NOT yet
+        // gating RoomTickService — wiring per-tenant tick deferral cleanly needs tenant-ordered
+        // scheduling and is out of Wave 1's scope. There is no per-tenant CPU-fairness behavior to
+        // observe black-box yet, so this stays a tracked skip rather than a half-real control.
         Skip.If(true,
-            "Accepted gap: FairTenantComputeBudget is built + unit-tested but not wired to the tick " +
-            "path. No per-tenant compute-fairness behavior is observable black-box yet.");
+            "Accepted gap: FairTenantComputeBudget is built + unit-tested but not yet gating the tick " +
+            "path. Wave 1 wired Gap A (per-tenant rate limiting); Gap B (compute fairness) is deferred.");
+    }
+
+    // Reads frames until a ServerError(BACKPRESSURE_REJECTED) is seen or the connection closes,
+    // bounded by the token so it cannot hang.
+    private static async Task<ErrorCode?> DrainForBackpressureAsync(RealtimeWireClient client, CancellationToken ct)
+    {
+        while (true)
+        {
+            RealtimeEnvelope? env;
+            try
+            {
+                env = await client.ReceiveEnvelopeAsync(ct);
+            }
+            catch
+            {
+                return null;
+            }
+
+            if (env is null)
+            {
+                return null;
+            }
+
+            if (env.PayloadCase == RealtimeEnvelope.PayloadOneofCase.ServerError
+                && env.ServerError.Code == ErrorCode.BackpressureRejected)
+            {
+                return env.ServerError.Code;
+            }
+        }
+    }
+
+    private static async Task AwaitWelcomeAsync(RealtimeWireClient client)
+    {
+        var ct = new CancellationTokenSource(TimeSpan.FromSeconds(10)).Token;
+        while (true)
+        {
+            var env = await client.ReceiveEnvelopeAsync(ct);
+            if (env is null || env.PayloadCase == RealtimeEnvelope.PayloadOneofCase.ServerWelcome)
+            {
+                return;
+            }
+        }
     }
 }

@@ -61,6 +61,13 @@ exercises the same listener the ALB targets.
 - **Pinned by:** `ProtocolFuzzTests.OversizeFrame_IsDroppedWithoutCrash` (1 MiB frame -> clean drop,
   `/ready` still 200). This is the end-to-end coverage for the frame-size bound; there is no
   co-located unit test because `GameServer.Tests` does not reference the Host.
+- **Defense-in-depth (Wave 1):** the transport frame cap drops oversize WS frames at the socket and
+  closes that connection. Behind it, the kernel now applies a SECOND, finer bound on the decoded
+  command size (`RealtimeServer` `maxCommandBytes`, `Realtime:MaxCommandBytes`, defaulting to the
+  frame cap): an over-bound command is shed with a typed `ServerError(MalformedMessage)` and the
+  connection SURVIVES — a single bad command is not a disconnect. This covers paths the WS frame cap
+  does not (the in-memory transport, and any decoded payload that slipped under the frame budget).
+  Pinned by `RealtimeServerSafetyTests.OversizedCommand_IsRejected_AndConnectionSurvives`.
 - **Status:** Fixed.
 
 ## Cross-tenant isolation (defense-in-depth, verified)
@@ -86,26 +93,37 @@ timeout) all shed gracefully (typed error / clean close / reap) and the server s
 and durations are bounded so the suite cannot hang or exhaust the host; the absolute production
 ceilings (100k connections, etc.) are not driven to their limit on a single test box.
 
-## Accepted gaps (tracked, not yet fixed)
+## Tenant fairness
 
-### Gap A - Per-tenant rate limiting not wired to the hot path
+### Gap A - Per-tenant rate limiting (FIXED, Wave 1)
 - **Severity:** Medium (noisy-neighbour / fairness).
-- **Detail:** `TokenBucketTenantRateLimiter` (`GameServer.Tenancy`) is built and unit-tested but NOT
-  wired into the realtime command path. Overload is currently shed by per-room queue depth (1024)
-  and admission caps, not by a per-tenant token bucket, so there is no `RATE_LIMITED` behavior to
-  observe black-box.
-- **Tracked by:** `AcceptedGapTests.PerTenantRateLimiting_IsNotYetWiredToTheHotPath` (permanently
-  skipped with this reason; flip to a real assertion once the limiter is wired - expect
-  `ERROR_CODE_RATE_LIMITED` under a sustained single-tenant flood).
-- **Status:** Accepted gap.
+- **Detail:** `TokenBucketTenantRateLimiter` (`GameServer.Tenancy`) is now WIRED into the realtime
+  command path: `RealtimeServer.HandleCommandAsync` meters every inbound command against the
+  sender's per-tenant token bucket BEFORE it reaches the room queue, and sheds the overflow as
+  `ServerError(Overloaded)` → `ERROR_CODE_BACKPRESSURE_REJECTED` on the wire (there is no distinct
+  `RATE_LIMITED` kernel code; backpressure is the honest, retryable code). The bucket reads time
+  through an injected `IMonotonicClock` so refill is deterministic under test. Buckets are
+  independent per tenant, so one tenant's flood cannot consume another tenant's allowance.
+- **Pinned by:**
+  - Black-box: `AcceptedGapTests.PerTenantRateLimiting_ShedsASustainedSingleTenantFlood` (a sustained
+    single-tenant flood is shed with `BACKPRESSURE_REJECTED` and the server stays `/ready`).
+  - In-process: `NoisyNeighborScenario.OneTenantFlood_DoesNotRaiseAnotherTenantsRejectRate`
+    (integration) and `RealtimeServerSafetyTests` (unit).
+  - Load: `load/scenarios/noisy-neighbor.json` (noisy tenant-a) run concurrently with
+    `noisy-neighbor-quiet.json` (tenant-b) — tenant-a is throttled (hundreds of thousands of
+    backpressure errors) while tenant-b's reject rate stays **0** and its p95 is flat.
+- **Status:** Fixed.
 
-### Gap B - Per-tenant compute budget not wired to the tick path
+### Gap B - Per-tenant compute budget not wired to the tick path (still tracked)
 - **Severity:** Medium (fairness under load).
-- **Detail:** `FairTenantComputeBudget` (`GameServer.Tenancy`) is built and unit-tested but NOT wired
-  into the tick/replication path, so there is no per-tenant compute fairness under load.
-- **Tracked by:** `AcceptedGapTests.PerTenantComputeBudget_IsNotYetWiredToTheHotPath` (permanently
-  skipped). Revisit once the budget is wired into `RoomTickService`.
-- **Status:** Accepted gap.
+- **Detail:** `FairTenantComputeBudget` (`GameServer.Tenancy`) is built and unit-tested
+  (`PerTenantComputeBudgetScenario` proves the fair-share math) but is NOT yet gating
+  `RoomTickService`, so there is no per-tenant compute fairness applied under load. Wiring it cleanly
+  needs tenant-ordered tick scheduling and was deliberately left out of Wave 1's scope rather than
+  shipped as a half-real control.
+- **Tracked by:** `AcceptedGapTests.PerTenantComputeBudget_IsNotYetWiredToTheTickPath` (skipped with
+  this reason). Revisit once the budget gates the tick scheduler.
+- **Status:** Accepted gap (deferred from Wave 1).
 
 ## Finding 5 - Wire error-code fidelity: authz rejections surfaced as INTERNAL_SERVER_ERROR
 - **Severity:** Low (information fidelity / observability; NOT an authorization bypass).

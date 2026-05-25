@@ -1,0 +1,29 @@
+{
+  // Noisy-neighbor isolation, the NOISY side. Run this CONCURRENTLY with noisy-neighbor-quiet.json
+  // (a different tenant). tenant-a hammers the realtime command path far past its per-tenant token
+  // bucket; the per-tenant rate limiter (RealtimeServer.HandleCommandAsync) throttles it and sheds
+  // the overflow as ERROR_CODE_BACKPRESSURE_REJECTED. The PROOF of isolation is in the quiet
+  // companion's result.json: tenant-b's serverErrors / reject rate must stay ~flat while this flood
+  // runs. The command path MUST use ClientCommand (this harness does) — ClientInputFrame is
+  // discarded by the server and does not count as liveness (idle reap).
+  "name": "noisy-neighbor",
+  "scenarioType": "sustained-input",
+  "serverUrl": "http://localhost:5000",
+  "joinTokenMode": "ControlPlane",
+  "apiKey": "dev-tenant-a-key",
+  "tenantId": "tenant-a",
+  "gameId": "demo-game",
+  "command": "MoveRight",
+  "roomCount": 10,
+  "clientsPerRoom": 20,
+  "totalClients": 200,
+  "rampUpDuration": 5,
+  "steadyStateDuration": 30,
+  "inputRatePerClientPerSecond": 200,
+  "snapshotAckMode": "EverySnapshot",
+  "pingInterval": 5,
+  "reconnectMode": "None",
+  "malformedClientPercent": 0,
+  "slowReceiverPercent": 0,
+  "outputDirectory": "load/results/noisy-neighbor"
+}

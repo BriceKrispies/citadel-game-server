@@ -26,7 +26,10 @@ public sealed class IntegrationHarness
         int maxQueueDepth = GameRoom.DefaultMaxQueueDepth,
         RoomLifecycle lifecycle = RoomLifecycle.Persist,
         AdmissionPolicy? admission = null,
-        int eventLogRetentionTicks = 0)
+        int eventLogRetentionTicks = 0,
+        ITenantRateLimiter? rateLimiter = null,
+        ITenantMetricsSink? tenantMetrics = null,
+        int maxCommandBytes = 0)
     {
         var contexts = (tenants ?? new[] { "tenant-a" })
             .Select(t => new TenantContext(new TenantId(t), $"Tenant {t}"));
@@ -38,7 +41,9 @@ public sealed class IntegrationHarness
         Snapshots = new InMemorySnapshotStore<RoomKey, RoomSnapshot>();
         Events = new InMemoryEventLog<RoomKey, RoomEvent>(e => e.Tick);
         Telemetry = new AggregatingTelemetrySink();
-        Server = new RealtimeServer(Tenants, Router, Snapshots, Events, Telemetry, policy, lifecycle, admission, eventLogRetentionTicks);
+        Server = new RealtimeServer(
+            Tenants, Router, Snapshots, Events, Telemetry, policy, lifecycle, admission, eventLogRetentionTicks,
+            rateLimiter: rateLimiter, tenantMetrics: tenantMetrics, maxCommandBytes: maxCommandBytes);
     }
 
     public InMemoryTenantResolver Tenants { get; }

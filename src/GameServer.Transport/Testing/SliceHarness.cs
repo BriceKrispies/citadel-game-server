@@ -1,3 +1,4 @@
+using GameServer.Observability;
 using GameServer.Observability.Testing;
 using GameServer.Persistence;
 using GameServer.Protocol;
@@ -25,6 +26,21 @@ public sealed class SliceHarness
 
     /// <summary>Overload for backpressure tests that need a small, easily-saturated command queue.</summary>
     public SliceHarness(int maxQueueDepth, params string[] tenantIds)
+        : this(maxQueueDepth, rateLimiter: null, tenantMetrics: null, maxCommandBytes: 0, tenantIds)
+    {
+    }
+
+    /// <summary>
+    /// Full overload for the hard-safety-boundary tests: lets a test wire the per-tenant rate
+    /// limiter, the per-tenant metrics sink, and the kernel-level command-size bound — the controls
+    /// Wave 1 enforces on the hot path.
+    /// </summary>
+    public SliceHarness(
+        int maxQueueDepth,
+        ITenantRateLimiter? rateLimiter,
+        ITenantMetricsSink? tenantMetrics,
+        int maxCommandBytes,
+        params string[] tenantIds)
     {
         var tenants = tenantIds.Length == 0 ? new[] { "tenant-a" } : tenantIds;
         Tenants = new InMemoryTenantResolver(
@@ -38,7 +54,9 @@ public sealed class SliceHarness
         Snapshots = new InMemorySnapshotStore<RoomKey, RoomSnapshot>();
         Events = new InMemoryEventLog<RoomKey, RoomEvent>();
         Telemetry = new TestTelemetrySink();
-        Server = new RealtimeServer(Tenants, Router, Snapshots, Events, Telemetry);
+        Server = new RealtimeServer(
+            Tenants, Router, Snapshots, Events, Telemetry,
+            rateLimiter: rateLimiter, tenantMetrics: tenantMetrics, maxCommandBytes: maxCommandBytes);
     }
 
     public InMemoryTenantResolver Tenants { get; }

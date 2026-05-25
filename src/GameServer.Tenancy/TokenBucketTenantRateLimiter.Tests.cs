@@ -37,6 +37,41 @@ public sealed class TenantRateLimiterTests
     }
 
     [Fact]
+    public void Refill_IsDriven_ByTheInjectedClock_Deterministically()
+    {
+        // With a fake clock that never advances, the bucket only ever holds its initial burst:
+        // no time passes, so no tokens refill. This pins refill to the injected clock (no
+        // wall-clock, no real sleep) and proves the limiter is deterministic under test.
+        var clock = new FakeMonotonicClock();
+        var limiter = new TokenBucketTenantRateLimiter(permitsPerSecond: 100, burst: 100, clock);
+        var tenant = new TenantId("tenant-a");
+
+        var admittedWithoutTime = 0;
+        for (var i = 0; i < 1000; i++)
+        {
+            if (limiter.TryAcquire(tenant))
+            {
+                admittedWithoutTime++;
+            }
+        }
+
+        Assert.Equal(100, admittedWithoutTime); // exactly the burst — clock frozen, zero refill
+
+        // Advance exactly one second: the bucket refills by exactly permitsPerSecond.
+        clock.Advance(TimeSpan.FromSeconds(1));
+        var admittedAfterOneSecond = 0;
+        for (var i = 0; i < 1000; i++)
+        {
+            if (limiter.TryAcquire(tenant))
+            {
+                admittedAfterOneSecond++;
+            }
+        }
+
+        Assert.Equal(100, admittedAfterOneSecond); // exactly one second's worth of refill
+    }
+
+    [Fact]
     public void Buckets_AreIsolatedPerTenant()
     {
         var limiter = new TokenBucketTenantRateLimiter(permitsPerSecond: 100, burst: 100);

@@ -87,6 +87,23 @@ public sealed class RealtimeServer
     private readonly IRoomDirectory? _roomDirectory;
     private readonly NodeId _localNode;
 
+    // Per-tenant ingress rate limiting — the core noisy-neighbor control on the message path. Null
+    // when not configured (unit harnesses): then no rate limiting is applied. When wired (the
+    // deployed host), every inbound command is metered against the sender's tenant bucket BEFORE it
+    // is enqueued, so one tenant's flood is shed to its fair share without touching another tenant's
+    // allowance (see HandleCommandAsync). Wired only at the composition root.
+    private readonly ITenantRateLimiter? _rateLimiter;
+    // Per-tenant inbound attribution. Null when not configured. When wired, every inbound message is
+    // counted against the sender's tenant here so an operator can rank tenants by message rate during
+    // a noisy-neighbor incident — something the tag-folding global sink cannot answer.
+    private readonly ITenantMetricsSink? _tenantMetrics;
+    // Kernel-level inbound command-size bound (bytes of the decoded command string). 0 = unbounded.
+    // This complements the transport-level frame cap (Realtime:MaxFrameBytes drops oversize WS
+    // frames at the socket): it guards paths the frame cap does not cover (the in-memory transport,
+    // and any decoded payload that slipped under the frame budget). An oversize command is shed with
+    // a typed ServerError and the connection SURVIVES — one bad frame is not a disconnect.
+    private readonly int _maxCommandBytes;
+
     // Admission counters. Guarded by _admissionLock (per-connection, not on the hot path).
     private readonly object _admissionLock = new();
     private readonly Dictionary<string, int> _connectionsPerTenant = new();
@@ -111,11 +128,17 @@ public sealed class RealtimeServer
         TimeSpan? handshakeTimeout = null,
         IIdleConnectionPolicy? idlePolicy = null,
         IRoomDirectory? roomDirectory = null,
-        NodeId localNode = default)
+        NodeId localNode = default,
+        ITenantRateLimiter? rateLimiter = null,
+        ITenantMetricsSink? tenantMetrics = null,
+        int maxCommandBytes = 0)
     {
         _tenants = tenants;
         _roomDirectory = roomDirectory;
         _localNode = localNode;
+        _rateLimiter = rateLimiter;
+        _tenantMetrics = tenantMetrics;
+        _maxCommandBytes = maxCommandBytes;
         _router = router;
         _snapshots = snapshots;
         _events = events;
@@ -238,6 +261,11 @@ public sealed class RealtimeServer
                 }
 
                 _telemetry.Increment(TelemetryMetrics.MessagesIn, Tags(("messageType", inbound.MessageType.ToString())));
+                // Attribute inbound volume to the connection's authorized tenant so an operator can
+                // rank tenants during a noisy-neighbor incident (the global sink folds tags away and
+                // cannot). The verified principal is authoritative — never the client's declared
+                // envelope tenant — so a spoofed tenant tag cannot mis-attribute another's load.
+                _tenantMetrics?.Record(principal.TenantId, TelemetryMetrics.MessagesIn, 1);
                 await ProcessAsync(connection, inbound, cancellationToken).ConfigureAwait(false);
                 receiveTask = transport.ReceiveAsync(cancellationToken);
             }
@@ -723,6 +751,34 @@ public sealed class RealtimeServer
         if (inbound.Payload is not ClientCommand command)
         {
             await RejectAsync(connection, inbound, ServerErrorCode.InvalidCommand, "Malformed command payload.", cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        // Kernel-level inbound size bound (defense-in-depth behind the transport frame cap): a
+        // single oversized command is shed with a typed error and the connection SURVIVES — one bad
+        // frame must not drop the socket. Counted as an invalid message, never silent.
+        if (_maxCommandBytes > 0)
+        {
+            var commandBytes = System.Text.Encoding.UTF8.GetByteCount(command.Command);
+            if (commandBytes > _maxCommandBytes)
+            {
+                await RejectAsync(connection, inbound, ServerErrorCode.MalformedMessage,
+                    $"Command payload of {commandBytes} bytes exceeds the {_maxCommandBytes}-byte limit.", cancellationToken).ConfigureAwait(false);
+                return;
+            }
+        }
+
+        // Per-tenant rate limiting: meter this command against the sender's tenant token bucket
+        // BEFORE it reaches the room queue. Over its fair share, the tenant's command is shed as
+        // backpressure (Overloaded → BACKPRESSURE_REJECTED on the wire) without consuming any room
+        // capacity — and, critically, without touching any OTHER tenant's bucket, so a flood by one
+        // tenant cannot raise another tenant's reject rate. The session's resolved tenant is
+        // authoritative (never the client's declared envelope tenant).
+        if (_rateLimiter is not null && !_rateLimiter.TryAcquire(session.Tenant.TenantId))
+        {
+            _telemetry.Increment(TelemetryMetrics.BackpressureRejections);
+            await RejectAsync(connection, inbound, ServerErrorCode.Overloaded,
+                "Tenant is over its command rate; retry shortly.", cancellationToken).ConfigureAwait(false);
             return;
         }
 

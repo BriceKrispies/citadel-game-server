@@ -92,12 +92,34 @@ builder.Services.AddSingleton<RealtimeServer>(sp => new RealtimeServer(
     // Release this node's room ownership claim as a room is reaped, so directory ownership tracks
     // live rooms (otherwise OwnedCount only grows and placement eventually wedges).
     roomDirectory: sp.GetRequiredService<IRoomDirectory>(),
-    localNode: localNode));
+    localNode: localNode,
+    // Per-tenant fairness + attribution + a kernel-level command-size bound, enforced ON the hot
+    // path (see RealtimeServer.HandleCommandAsync / HandleConnectionAsync) — not dormant seams.
+    rateLimiter: sp.GetRequiredService<ITenantRateLimiter>(),
+    tenantMetrics: sp.GetRequiredService<ITenantMetricsSink>(),
+    // Defense-in-depth behind the transport frame cap (Realtime:MaxFrameBytes): a decoded command
+    // larger than this is shed with a typed error and the connection survives. Defaults to the frame
+    // cap so the two bounds agree; a single value keeps the story simple.
+    maxCommandBytes: builder.Configuration.GetValue("Realtime:MaxCommandBytes", AspNetRealtimeChannel.DefaultMaxMessageBytes)));
 // Rooms are independent state owners, so tick them concurrently across all cores; one
 // slow room must not block the rest (head-of-line blocking).
 builder.Services.AddSingleton<IRoomTickScheduler>(_ => ParallelRoomTickScheduler.ForProcessorCount());
 // Bounded per-room tick-cost telemetry so ops can find the hot room (the global sink can't).
 builder.Services.AddSingleton<RoomScopedMetrics>(_ => new RoomScopedMetrics(maxRooms: 1024));
+// Bounded per-tenant inbound attribution so ops can NAME the noisy tenant during an incident (the
+// global sink folds tags away). Fed from the realtime edge (see RealtimeServer); exposed both as the
+// concrete type (admin reads) and the rank-0 ITenantMetricsSink port (the edge writes through it).
+builder.Services.AddSingleton<TenantScopedMetrics>(_ => new TenantScopedMetrics(maxTenants: 4096));
+builder.Services.AddSingleton<ITenantMetricsSink>(sp => sp.GetRequiredService<TenantScopedMetrics>());
+// Per-tenant ingress rate limiting — the core noisy-neighbor control on the realtime command path.
+// Each tenant gets its own token bucket (independent buckets), so one tenant's flood is throttled to
+// its fair share and shed cleanly without touching another tenant's allowance. Sized from config;
+// reads time through the monotonic-clock seam so refill is testable.
+builder.Services.AddSingleton<IMonotonicClock, SystemMonotonicClock>();
+var tenantPermitsPerSecond = builder.Configuration.GetValue("Realtime:TenantCommandsPerSecond", 2_000);
+var tenantBurst = builder.Configuration.GetValue("Realtime:TenantCommandBurst", 4_000);
+builder.Services.AddSingleton<ITenantRateLimiter>(sp => new TokenBucketTenantRateLimiter(
+    tenantPermitsPerSecond, tenantBurst, sp.GetRequiredService<IMonotonicClock>()));
 // Long-running loops run as supervised workers, not bare hosted services: the supervisor
 // restarts a faulting worker (counted as worker_restart_count) instead of letting an
 // unhandled fault stop the whole host, and drains them within a bounded budget on shutdown.
@@ -220,6 +242,42 @@ builder.Services.AddSingleton<RoomLeaseRenewalService>(sp => new RoomLeaseRenewa
     sp.GetRequiredService<ILogger<RoomLeaseRenewalService>>()));
 builder.Services.AddSingleton<ISupervisedWorker>(sp => sp.GetRequiredService<RoomLeaseRenewalService>());
 
+// ---- Readiness contributors (real dependency probes for /ready) -------------
+// Each probe is a CHEAP invariant on a hot-path dependency, so /ready proves the node can actually
+// do useful work without becoming a DoS vector. Registered as IReadinessCheck so the /ready endpoint
+// folds them generically — and so a test can substitute a failing fake to prove /ready flips to 503.
+builder.Services.AddSingleton<IReadinessCheck>(sp => new DelegateReadinessCheck("telemetry", () =>
+{
+    // The aggregating sink the hot path feeds: a successful snapshot proves it can accept telemetry.
+    sp.GetRequiredService<AggregatingTelemetrySink>().Snapshot();
+    return ReadinessResult.Healthy("telemetry");
+}));
+builder.Services.AddSingleton<IReadinessCheck>(sp => new DelegateReadinessCheck("tenant-resolver", () =>
+{
+    // The resolver must be present and answerable; an unknown tenant resolving false is still a
+    // healthy resolver (it answered). A throw (resolver wedged) is caught by /ready as not-ready.
+    sp.GetRequiredService<ITenantResolver>().TryResolve(new TenantId("__readiness_probe__"), out _);
+    return ReadinessResult.Healthy("tenant-resolver");
+}));
+builder.Services.AddSingleton<IReadinessCheck>(sp => new DelegateReadinessCheck("snapshot-store", () =>
+{
+    // A read against a probe key proves the store is reachable and answering (the in-memory store
+    // returns false for a miss; a durable store would surface an outage as a throw → not-ready).
+    sp.GetRequiredService<ISnapshotStore<RoomKey, RoomSnapshot>>()
+        .TryGetLatest(new RoomKey(new TenantId("__readiness_probe__"), new RoomId("__probe__")), out _);
+    return ReadinessResult.Healthy("snapshot-store");
+}));
+// When a distributed room directory is configured, the node is not ready until it can reach it
+// (otherwise it would accept connections it cannot place or fence — split brain). No-op for the
+// in-memory backend (no multiplexer registered).
+builder.Services.AddSingleton<IReadinessCheck>(sp => new DelegateReadinessCheck("room-directory", () =>
+{
+    var multiplexer = sp.GetService<IConnectionMultiplexer>();
+    return multiplexer is null || multiplexer.IsConnected
+        ? ReadinessResult.Healthy("room-directory")
+        : ReadinessResult.Unhealthy("room-directory", "room directory (redis) is not connected");
+}));
+
 var app = builder.Build();
 
 // Cap a single reassembled realtime message so one connection cannot force the server to
@@ -234,21 +292,39 @@ app.UseWebSockets();
 // ============================================================================
 // Control-plane HTTP API. JSON DTOs; session lifecycle only; no gameplay logic.
 // ============================================================================
+// Liveness: a cheap "the process is up" probe. It must stay trivial — it says nothing about
+// whether dependencies are healthy (that is /ready's job) and must never block on one.
 app.MapGet("/health", () => Results.Ok(new { status = "healthy" }));
-// Readiness proves the node can actually do useful work: when a distributed room directory is
-// configured, the node is not ready until it can reach it (otherwise it would accept connections it
-// cannot place or fence). With the in-memory backend there is nothing external to check.
-app.MapGet("/ready", (IServiceProvider sp) =>
+// Readiness PROVES the node can do useful work: it runs every registered IReadinessCheck
+// contributor (telemetry sink, tenant resolver, snapshot store, and the room directory when a
+// distributed backend is configured) and flips to 503 the moment ANY dependency is not ready, so an
+// orchestrator stops routing traffic to a node that would only fail requests. Each contributor is
+// CHEAP (a fast invariant, not a scan), so readiness cannot itself become a DoS vector. A throwing
+// contributor is treated as not-ready (fail-closed) rather than crashing the probe.
+app.MapGet("/ready", (IEnumerable<IReadinessCheck> checks) =>
 {
-    var multiplexer = sp.GetService<IConnectionMultiplexer>();
-    if (multiplexer is not null && !multiplexer.IsConnected)
+    var results = new List<ReadinessResult>();
+    foreach (var check in checks)
+    {
+        try
+        {
+            results.Add(check.Check());
+        }
+        catch (Exception ex)
+        {
+            results.Add(ReadinessResult.Unhealthy(check.Name, $"probe threw: {ex.GetType().Name}"));
+        }
+    }
+
+    var dependencies = results.Select(r => new { name = r.Name, ready = r.Ready, detail = r.Detail }).ToArray();
+    if (results.Any(r => !r.Ready))
     {
         return Results.Json(
-            new { status = "not-ready", reason = "room directory (redis) is not connected" },
+            new { status = "not-ready", dependencies },
             statusCode: StatusCodes.Status503ServiceUnavailable);
     }
 
-    return Results.Ok(new { status = "ready" });
+    return Results.Ok(new { status = "ready", dependencies });
 });
 app.MapGet("/version", () => Results.Ok(new
 {
@@ -724,4 +800,25 @@ public sealed class ApiKeyEntry
     public string? CallerId { get; set; }
     public string? TenantId { get; set; }
     public List<string>? Roles { get; set; }
+}
+
+/// <summary>
+/// An <see cref="IReadinessCheck"/> backed by a probe delegate, so each dependency's readiness logic
+/// is wired inline at the composition root (the only place that knows the concrete dependencies)
+/// without a bespoke class per dependency. A probe that throws is surfaced as not-ready by the
+/// <c>/ready</c> endpoint (fail-closed), never propagated.
+/// </summary>
+public sealed class DelegateReadinessCheck : IReadinessCheck
+{
+    private readonly Func<ReadinessResult> _probe;
+
+    public DelegateReadinessCheck(string name, Func<ReadinessResult> probe)
+    {
+        Name = name;
+        _probe = probe;
+    }
+
+    public string Name { get; }
+
+    public ReadinessResult Check() => _probe();
 }

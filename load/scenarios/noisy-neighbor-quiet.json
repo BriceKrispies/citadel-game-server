@@ -1,0 +1,27 @@
+{
+  // Noisy-neighbor isolation, the QUIET side. Run this CONCURRENTLY with noisy-neighbor.json.
+  // tenant-b sends a modest, in-budget stream while tenant-a floods. With per-tenant rate limiting
+  // enforced, tenant-b's bucket is independent of tenant-a's, so this scenario's reject rate
+  // (serverErrors in its result.json) must stay ~flat — the isolation evidence. If tenant-b's
+  // rejects climb in lockstep with tenant-a's flood, the per-tenant buckets are leaking.
+  "name": "noisy-neighbor-quiet",
+  "scenarioType": "sustained-input",
+  "serverUrl": "http://localhost:5000",
+  "joinTokenMode": "ControlPlane",
+  "apiKey": "dev-tenant-b-key",
+  "tenantId": "tenant-b",
+  "gameId": "demo-game",
+  "command": "MoveRight",
+  "roomCount": 5,
+  "clientsPerRoom": 10,
+  "totalClients": 50,
+  "rampUpDuration": 5,
+  "steadyStateDuration": 30,
+  "inputRatePerClientPerSecond": 5,
+  "snapshotAckMode": "EverySnapshot",
+  "pingInterval": 5,
+  "reconnectMode": "None",
+  "malformedClientPercent": 0,
+  "slowReceiverPercent": 0,
+  "outputDirectory": "load/results/noisy-neighbor-quiet"
+}

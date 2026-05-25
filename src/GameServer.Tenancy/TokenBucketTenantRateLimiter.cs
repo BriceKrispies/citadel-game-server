@@ -1,5 +1,4 @@
 using System.Collections.Concurrent;
-using System.Diagnostics;
 using GameServer.Protocol;
 
 namespace GameServer.Tenancy;
@@ -21,11 +20,16 @@ public sealed class TokenBucketTenantRateLimiter : ITenantRateLimiter
 {
     private readonly int _permitsPerSecond;
     private readonly int _burst;
+    private readonly IMonotonicClock _clock;
     private readonly ConcurrentDictionary<string, Bucket> _buckets = new();
 
     /// <param name="permitsPerSecond">Sustained per-tenant refill rate.</param>
     /// <param name="burst">Maximum tokens a tenant may accumulate (burst allowance).</param>
-    public TokenBucketTenantRateLimiter(int permitsPerSecond, int burst)
+    /// <param name="clock">
+    /// Monotonic time source for refill. Injected so refill is deterministic under test (a fake
+    /// clock advances by an exact amount); defaults to the system high-resolution timer.
+    /// </param>
+    public TokenBucketTenantRateLimiter(int permitsPerSecond, int burst, IMonotonicClock? clock = null)
     {
         if (permitsPerSecond <= 0)
         {
@@ -39,6 +43,7 @@ public sealed class TokenBucketTenantRateLimiter : ITenantRateLimiter
 
         _permitsPerSecond = permitsPerSecond;
         _burst = burst;
+        _clock = clock ?? new SystemMonotonicClock();
     }
 
     public bool TryAcquire(TenantId tenant, int permits = 1)
@@ -66,7 +71,7 @@ public sealed class TokenBucketTenantRateLimiter : ITenantRateLimiter
         }
     }
 
-    private static double NowSeconds() => Stopwatch.GetTimestamp() / (double)Stopwatch.Frequency;
+    private double NowSeconds() => _clock.ElapsedSeconds;
 
     private sealed class Bucket
     {
