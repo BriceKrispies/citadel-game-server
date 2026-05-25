@@ -1,0 +1,45 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+    <!-- Black-box e2e: starts the hardened citadel-host image via Testcontainers and drives it over
+         real HTTP+WebSocket. Not in the fast unit loop; run explicitly (needs a container engine). -->
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="Testcontainers" Version="4.12.0" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" />
+    <PackageReference Include="Xunit.SkippableFact" Version="1.5.61" />
+  </ItemGroup>
+
+  <!-- RealtimeWireClient pulls in GameServer.Transport, which links the ASP.NET shared framework. -->
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+  </ItemGroup>
+
+  <!-- Reuse the proven SecurityTests black-box harness by LINK-compiling its four files (no project ref
+       to that suite, no production change). They depend only on Protocol/Transport, referenced below. -->
+  <ItemGroup>
+    <Compile Include="..\GameServer.SecurityTests\SecurityTarget.cs" Link="Harness\SecurityTarget.cs" />
+    <Compile Include="..\GameServer.SecurityTests\RealtimeWireClient.cs" Link="Harness\RealtimeWireClient.cs" />
+    <Compile Include="..\GameServer.SecurityTests\WireEnvelopes.cs" Link="Harness\WireEnvelopes.cs" />
+    <Compile Include="..\GameServer.SecurityTests\ControlPlane.cs" Link="Harness\ControlPlane.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\GameServer.Abstractions\GameServer.Abstractions.csproj" />
+    <ProjectReference Include="..\..\src\GameServer.Protocol\GameServer.Protocol.csproj" />
+    <ProjectReference Include="..\..\src\GameServer.Transport\GameServer.Transport.csproj" />
+    <ProjectReference Include="..\..\src\GameServer.Simulation\GameServer.Simulation.csproj" />
+  </ItemGroup>
+
+</Project>

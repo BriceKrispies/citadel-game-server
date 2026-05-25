@@ -35,3 +35,15 @@ public sealed record CreateGameVersionRequest(int SchemaVersion, string Notes);
 
 /// <summary>Read/update the realtime admission ceilings (platform-admin).</summary>
 public sealed record AdmissionLimitsContract(int MaxConnections, int MaxConnectionsPerTenant, int MaxRooms, int MaxRoomsPerTenant);
+
+/// <summary>
+/// One available room for a game, as returned by <c>GET /api/v1/games/{gameId}/rooms</c>. Carries the
+/// control-plane record (RoomId/Status) plus a snapshot of LIVE realtime state when the room is running
+/// (<see cref="Live"/> true → <see cref="Tick"/>/<see cref="SubscriberCount"/> from the data plane);
+/// a created-but-never-joined room reports <see cref="Live"/> false with tick/subscribers 0.
+/// </summary>
+public sealed record RoomSummaryContract(
+    string RoomId, string GameId, string TenantId, string Status, int SubscriberCount, long Tick, bool Live);
+
+/// <summary>The available rooms for a game in the caller's tenant (always at least one).</summary>
+public sealed record GameRoomsContract(string GameId, IReadOnlyList<RoomSummaryContract> Rooms);

@@ -674,6 +674,45 @@ api.MapDelete("/games/{gameId}", (HttpContext ctx, string gameId, IGameRegistry 
     return Results.NoContent();
 });
 
+// Tenant-facing room discovery: the AVAILABLE rooms for a game in the CALLER'S OWN tenant, each with a
+// snapshot of live state. Tenant-scoped by caller.TenantId (never a route/query tenant), so a client can
+// never enumerate another tenant's rooms. Guarantees at least one room: if the tenant has none for this
+// game, one default room is lazily created (and placed) so a client always has somewhere to join. This is
+// a control-plane read (off the realtime hot path); TryObserveRoom is the same brief lock-projected view
+// /admin/rooms uses. Discovery deliberately stays on the control plane (see PROTOCOL.md "listRooms").
+api.MapGet("/games/{gameId}/rooms",
+    (HttpContext ctx, string gameId, IGameRegistry catalog, InMemoryRoomRegistry rooms, IRoomPlacement placement, RealtimeServer server, IAuditLog audit, IClock clock) =>
+{
+    var caller = (CallerPrincipal)ctx.Items["caller"]!;
+
+    if (!catalog.TryGet(gameId, out _))
+    {
+        return Results.NotFound(new ApiError("GameNotFound", $"Game '{gameId}' was not found."));
+    }
+
+    var tenantId = caller.TenantId;
+
+    // Always >=1 room: ensure (idempotently) the caller's tenant has an open room for this game, then
+    // place it on a node (best-effort, off the hot path) so a subsequent connect routes rather than 503s.
+    var ensured = rooms.EnsureAtLeastOne(tenantId, gameId);
+    placement.Place(new RoomKey(new TenantId(ensured.TenantId), new RoomId(ensured.RoomId)));
+
+    var summaries = new List<RoomSummaryContract>();
+    foreach (var room in rooms.ListForGame(tenantId, gameId))
+    {
+        var key = new RoomKey(new TenantId(room.TenantId), new RoomId(room.RoomId));
+        var live = server.TryObserveRoom(key, out var observation);
+        summaries.Add(new RoomSummaryContract(
+            room.RoomId, room.GameId, room.TenantId, room.Status,
+            SubscriberCount: live ? observation.SubscriberCount : 0,
+            Tick: live ? observation.Tick : 0,
+            Live: live));
+    }
+
+    Audit(ctx, "list-game-rooms", $"{tenantId}/{gameId}", audit, clock, tenantId);
+    return Results.Ok(new GameRoomsContract(gameId, summaries));
+});
+
 api.MapPost("/rooms", (HttpContext ctx, CreateRoomRequest request, IGameRegistry catalog, InMemoryRoomRegistry rooms, IRoomPlacement placement, IAuditLog audit, IClock clock) =>
 {
     if (Forbid(ctx, request.TenantId, "create-room", $"{request.TenantId}/{request.GameId}", audit, clock) is { } denied)

@@ -21,6 +21,15 @@ public sealed class SecurityTarget
 
     public static readonly SecurityTarget Current = ReadFromEnvironment();
 
+    /// <summary>
+    /// Build a target with an EXPLICIT base URL + credentials instead of the env contract. Used by the
+    /// end-to-end suite, which starts the hardened image via Testcontainers and only knows the
+    /// dynamically-mapped host port at runtime (so it cannot rely on <c>CITADEL_SECURITY_TARGET</c>).
+    /// </summary>
+    public static SecurityTarget ForExplicit(
+        string baseUrl, string tenantAKey, string tenantBKey, string adminKey, string joinSecret) =>
+        new(baseUrl, tenantAKey, tenantBKey, adminKey, joinSecret);
+
     private SecurityTarget(string? baseUrl, string? tenantAKey, string? tenantBKey, string? adminKey, string? joinSecret)
     {
         BaseUrl = baseUrl;
