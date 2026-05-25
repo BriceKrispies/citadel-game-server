@@ -153,6 +153,90 @@ public sealed class DegradationLadderScenario
             "the degradation controller must escalate so the data plane sheds optional work before authoritative correctness is at risk.");
     }
 
+    /// <summary>
+    /// The adversarial authoritative-drop invariant: PIN the ladder at its MAX rung
+    /// (<see cref="DegradationLevel.RejectNewConnections"/>) and prove that an already-established room's
+    /// authoritative simulation is never gated by degradation — across MANY ticks the tick advances by
+    /// exactly one each cycle, the per-player state mutates from queued commands, and EVERY tick persists a
+    /// snapshot and its events to the durable stores. Degradation may only shed OPTIONAL load (new
+    /// connections/rooms, telemetry, spectator push); it may never slow, skip, or stop the authoritative
+    /// tick / state mutation / persistence. If this regresses, that is a Critical defect.
+    /// </summary>
+    [Fact]
+    public async Task PinnedAtMaxDegradation_AuthoritativeTickStateAndPersistenceNeverGated()
+    {
+        const double tickBudgetMs = 50.0;
+        var controller = new LadderDegradationController(tickBudgetMs);
+        var health = new TickHealthWindow(tickBudgetMs, capacity: 8);
+
+        // MoveRightGame so we can assert STATE actually mutates (player X advances), not just the tick number.
+        var harness = new IntegrationHarness(
+            _ => new GameServer.Simulation.MoveRightGame(),
+            tenants: new[] { "tenant-a" },
+            lifecycle: RoomLifecycle.Persist,
+            degradation: controller);
+
+        var key = harness.Key("tenant-a", "live-room");
+        await harness.JoinAsync("tenant-a", "live-room", "p1");
+
+        // The authoritative room owner (created at join, kept alive by Persist). The edge's TickRoom
+        // drains its queue under the room lock — exactly the path that must never be gated by degradation.
+        var player = new GameServer.Protocol.PlayerId("p1");
+        Assert.True(harness.Router.TryGetRoom(key, out var room));
+        room.Join(player); // re-establish membership (the joining connection left on close under Persist)
+
+        // Pin the controller at the TOP rung with sustained overload signals.
+        for (var i = 0; i < 8; i++)
+        {
+            health.Record(tickBudgetMs * 3);
+        }
+
+        Assert.Equal(DegradationLevel.RejectNewConnections, controller.Observe(health.MissedTickRate, health.TickP95Ms));
+
+        // A new connection IS refused at this rung (optional load shed) — establishes we are genuinely pinned.
+        var refused = await harness.RunClientAsync("tenant-a", "second-room", "p2", "demo", commands: Array.Empty<string>());
+        Assert.Contains(refused.DrainOutbound(), m => m.Payload is ServerError { Code: ServerErrorCode.Overloaded });
+
+        // ---- Authoritative path across MANY ticks, while pinned at max the whole time. ----
+        long previousTick = -1;
+        long sequence = 1;
+        for (var i = 0; i < 25; i++)
+        {
+            // Enqueue a command on the authoritative room (the state owner), then tick through the EDGE.
+            // Re-pin every iteration so the controller is unambiguously at max throughout (no recovery).
+            Assert.Equal(GameServer.Simulation.CommandAdmission.Accepted, room.TryEnqueue(player, GameServer.Simulation.MoveRightGame.MoveRight, sequence++));
+            for (var j = 0; j < 8; j++)
+            {
+                health.Record(tickBudgetMs * 3);
+            }
+
+            controller.Observe(health.MissedTickRate, health.TickP95Ms);
+            Assert.Equal(DegradationLevel.RejectNewConnections, controller.Current);
+
+            await harness.Server.TickRoom(key);
+
+            // (a) tick strictly advances by one — never skipped or stalled by degradation.
+            Assert.True(harness.Server.TryObserveRoom(key, out var observation));
+            if (previousTick >= 0)
+            {
+                Assert.Equal(previousTick + 1, observation.Tick);
+            }
+
+            previousTick = observation.Tick;
+
+            // (b) persistence is never gated: the durable snapshot store holds THIS tick.
+            Assert.True(harness.Snapshots.TryGetLatest(key, out var saved));
+            Assert.Equal(observation.Tick, saved.Tick);
+
+            // (c) state mutated under max degradation: p1's X equals the number of commands applied so far.
+            var p1 = observation.Entities.Single(e => e.EntityId == "p1");
+            Assert.Equal(i + 1, GameServer.Simulation.MoveRightGame.DecodeX(Convert.FromBase64String(p1.PayloadBase64)));
+        }
+
+        _output.WriteLine(
+            $"pinned at {controller.Current} for 25 ticks; tick advanced to {previousTick}, p1.x reached 25, snapshot persisted every tick");
+    }
+
     /// <summary>Ticks the room once and returns the post-tick authoritative tick number.</summary>
     private static long AdvanceAndReadTick(IntegrationHarness harness, string room)
     {
