@@ -7,5 +7,6 @@ artifacts/
 StrykerOutput/
 stryker-*.log
 host.log
+analyzer-test.log
 load/results/
 .claude/
