@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using GameServer.Cluster.Redis;
 using GameServer.ControlPlane;
 using GameServer.Host;
 using GameServer.Identity;
@@ -14,6 +15,7 @@ using GameServer.Simulation;
 using GameServer.Tenancy;
 using GameServer.Transport;
 using Microsoft.Extensions.DependencyInjection;
+using StackExchange.Redis;
 
 var builder = WebApplication.CreateBuilder(args);
 builder.WebHost.UseUrls("http://localhost:5000");
@@ -83,10 +85,30 @@ builder.Services.AddHostedService<SupervisorHostedService>();
 
 // ---- Identity (edge auth) ---------------------------------------------------
 // Signed, short-lived, scoped join tokens. The control plane issues them; the
-// realtime edge verifies them statelessly. The secret MUST be overridden in
-// production via configuration (Auth:JoinTokenSecret) — the fallback is dev-only.
-var joinTokenSecret = builder.Configuration["Auth:JoinTokenSecret"]
-    ?? "dev-only-insecure-join-token-secret-change-me";
+// realtime edge verifies them statelessly. The secret signs every join token, so a
+// known/weak secret means an attacker can forge tokens for any tenant/room/player.
+// In Development a fixed dev secret keeps the local workflow frictionless; in any other
+// environment the host FAILS TO START unless a strong, non-default secret is configured
+// (Auth:JoinTokenSecret) — failing closed beats silently signing with a forgeable key.
+const string DevJoinTokenSecret = "dev-only-insecure-join-token-secret-change-me";
+string joinTokenSecret;
+if (builder.Environment.IsDevelopment())
+{
+    joinTokenSecret = builder.Configuration["Auth:JoinTokenSecret"] ?? DevJoinTokenSecret;
+}
+else
+{
+    joinTokenSecret = builder.Configuration["Auth:JoinTokenSecret"]
+        ?? throw new InvalidOperationException(
+            "Auth:JoinTokenSecret is not configured. The realtime edge cannot verify join tokens " +
+            "without a signing secret; refusing to start outside Development.");
+    if (joinTokenSecret == DevJoinTokenSecret || joinTokenSecret.Length < 32)
+    {
+        throw new InvalidOperationException(
+            "Auth:JoinTokenSecret must be a strong, non-default secret (at least 32 characters) " +
+            "outside Development. A known or short secret allows join-token forgery.");
+    }
+}
 builder.Services.AddSingleton<IClock, SystemClock>();
 builder.Services.AddSingleton<Hs256JoinTokenCodec>(sp => new Hs256JoinTokenCodec(
     joinTokenSecret, sp.GetRequiredService<IClock>(), TimeSpan.FromMinutes(2)));
@@ -102,18 +124,78 @@ builder.Services.AddSingleton<JoinTokenService>();
 builder.Services.AddSingleton<InMemorySessionRegistry>();
 
 // Control-plane caller auth: API keys presented as `Authorization: Bearer <key>`.
-// Dev keys only — production configures real keys or swaps in an IdP-backed
-// IControlPlaneAuthenticator without touching the endpoints.
-builder.Services.AddSingleton<IControlPlaneAuthenticator>(new ApiKeyControlPlaneAuthenticator(
-    new Dictionary<string, CallerPrincipal>
+// In Development a fixed set of dev keys is seeded for local exploration. Outside
+// Development the dev keys are NEVER present; keys come from configuration
+// (ControlPlane:ApiKeys) and the host fails closed if none are configured — an
+// unauthenticated control plane is worse than one that will not start. Swapping in an
+// IdP-backed IControlPlaneAuthenticator remains a one-component change behind the seam.
+Dictionary<string, CallerPrincipal> controlPlaneApiKeys;
+if (builder.Environment.IsDevelopment())
+{
+    controlPlaneApiKeys = new Dictionary<string, CallerPrincipal>
     {
         ["dev-tenant-a-key"] = new("dev-operator-a", "tenant-a", new HashSet<string>()),
         ["dev-tenant-b-key"] = new("dev-operator-b", "tenant-b", new HashSet<string>()),
         ["dev-admin-key"] = new("dev-admin", "tenant-a", new HashSet<string> { CallerPrincipal.PlatformAdminRole }),
-    }));
+    };
+}
+else
+{
+    var configured = builder.Configuration.GetSection("ControlPlane:ApiKeys").Get<List<ApiKeyEntry>>() ?? new();
+    if (configured.Count == 0)
+    {
+        throw new InvalidOperationException(
+            "No control-plane API keys are configured (ControlPlane:ApiKeys). Refusing to start " +
+            "outside Development with an unauthenticated control plane.");
+    }
+
+    controlPlaneApiKeys = configured.ToDictionary(
+        e => e.Key ?? throw new InvalidOperationException("A ControlPlane:ApiKeys entry is missing its Key."),
+        e => new CallerPrincipal(
+            e.CallerId ?? throw new InvalidOperationException($"API key '{e.Key}' is missing CallerId."),
+            e.TenantId ?? throw new InvalidOperationException($"API key '{e.Key}' is missing TenantId."),
+            (e.Roles ?? new List<string>()).ToHashSet()));
+}
+
+builder.Services.AddSingleton<IControlPlaneAuthenticator>(new ApiKeyControlPlaneAuthenticator(controlPlaneApiKeys));
 builder.Services.AddSingleton<IAuditLog, InMemoryAuditLog>();
 
+// ---- Clustering: room ownership directory, placement, affinity routing -------
+// A fleet must agree on exactly one owner per room or it split-brains (the same room ticking on two
+// nodes — see MultiNodeOwnershipScenario). The directory is the source of truth; placement assigns
+// owners capacity-aware; the affinity router redirects a connection that landed on a non-owner. The
+// backend is config-selected: in-memory for a single node / dev (authoritative for THIS process only),
+// Redis for a real fleet — same contracts, like InMemory↔durable snapshot stores. NodeId is this
+// node's reachable base address, so a redirect can carry it directly.
+var localNode = new NodeId(builder.Configuration["Cluster:NodeId"] ?? "http://localhost:5000");
+var fleetNodes = builder.Configuration.GetSection("Cluster:Nodes").Get<string[]>() is { Length: > 0 } configuredNodes
+    ? configuredNodes.Select(n => new NodeId(n)).ToArray()
+    : new[] { localNode };
+var maxRoomsPerNode = builder.Configuration.GetValue("Cluster:MaxRoomsPerNode", 10_000);
+
+if (string.Equals(builder.Configuration["Cluster:Backend"], "Redis", StringComparison.OrdinalIgnoreCase))
+{
+    var redisConnection = builder.Configuration["Cluster:Redis:ConnectionString"]
+        ?? throw new InvalidOperationException("Cluster:Backend=Redis requires Cluster:Redis:ConnectionString.");
+    var redisOptions = new RedisClusterOptions();
+    builder.Services.AddSingleton<IConnectionMultiplexer>(_ => ConnectionMultiplexer.Connect(redisConnection));
+    builder.Services.AddSingleton<IRoomDirectory>(sp => new RedisRoomDirectory(sp.GetRequiredService<IConnectionMultiplexer>(), redisOptions));
+    builder.Services.AddSingleton<IRoomPlacement>(sp => new RedisRoomPlacement(sp.GetRequiredService<IConnectionMultiplexer>(), fleetNodes, maxRoomsPerNode, redisOptions));
+}
+else
+{
+    builder.Services.AddSingleton<IRoomDirectory, InMemoryRoomDirectory>();
+    builder.Services.AddSingleton<IRoomPlacement>(sp => new CapacityAwareRoomPlacement(sp.GetRequiredService<IRoomDirectory>(), fleetNodes, maxRoomsPerNode));
+}
+
+builder.Services.AddSingleton<IRoomAffinityRouter>(sp => new DirectoryRoomAffinityRouter(sp.GetRequiredService<IRoomDirectory>(), localNode));
+
 var app = builder.Build();
+
+// Cap a single reassembled realtime message so one connection cannot force the server to
+// buffer without bound (a single-connection OOM). Configurable; defaults to a size far above
+// any legitimate command frame.
+var maxFrameBytes = app.Configuration.GetValue("Realtime:MaxFrameBytes", AspNetRealtimeChannel.DefaultMaxMessageBytes);
 
 app.UseDefaultFiles();
 app.UseStaticFiles();
@@ -156,7 +238,7 @@ api.MapGet("/games/{gameId}", (string gameId, InMemoryGameCatalog catalog) =>
         ? Results.Ok(game)
         : Results.NotFound(new ApiError("GameNotFound", $"Game '{gameId}' was not found.")));
 
-api.MapPost("/rooms", (HttpContext ctx, CreateRoomRequest request, InMemoryGameCatalog catalog, InMemoryRoomRegistry rooms, IAuditLog audit, IClock clock) =>
+api.MapPost("/rooms", (HttpContext ctx, CreateRoomRequest request, InMemoryGameCatalog catalog, InMemoryRoomRegistry rooms, IRoomPlacement placement, IAuditLog audit, IClock clock) =>
 {
     if (Forbid(ctx, request.TenantId, "create-room", $"{request.TenantId}/{request.GameId}", audit, clock) is { } denied)
     {
@@ -169,7 +251,20 @@ api.MapPost("/rooms", (HttpContext ctx, CreateRoomRequest request, InMemoryGameC
     }
 
     var room = rooms.Create(request);
-    Audit(ctx, "create-room", $"{room.TenantId}/{room.RoomId}", audit, clock);
+
+    // Assign the room a single owning node across the cluster. A full cluster sheds the request
+    // cleanly (503) rather than placing a room nothing can own. The owner is surfaced in a header so a
+    // client can connect straight to it (the connect path also redirects a mis-routed client).
+    var placed = placement.Place(new RoomKey(new TenantId(room.TenantId), new RoomId(room.RoomId)));
+    if (!placed.IsPlaced)
+    {
+        return Results.Json(
+            new ApiError("ClusterAtCapacity", "No node has spare capacity for a new room."),
+            statusCode: StatusCodes.Status503ServiceUnavailable);
+    }
+
+    ctx.Response.Headers["X-Citadel-Owner-Node"] = placed.Owner.Value;
+    Audit(ctx, "create-room", $"{room.TenantId}/{room.RoomId}@{placed.Owner.Value}", audit, clock);
     return Results.Created($"/api/v1/rooms/{room.RoomId}", room);
 });
 
@@ -185,7 +280,7 @@ api.MapGet("/rooms/{roomId}", (HttpContext ctx, string roomId, InMemoryRoomRegis
 });
 
 api.MapPost("/rooms/{roomId}/join-token",
-    (HttpContext ctx, string roomId, CreateJoinTokenRequest request, InMemoryRoomRegistry rooms, JoinTokenService tokens, IAuditLog audit, IClock clock) =>
+    (HttpContext ctx, string roomId, CreateJoinTokenRequest request, InMemoryRoomRegistry rooms, JoinTokenService tokens, IRoomDirectory directory, IAuditLog audit, IClock clock) =>
 {
     if (!rooms.TryGet(roomId, out var room))
     {
@@ -199,6 +294,14 @@ api.MapPost("/rooms/{roomId}/join-token",
     }
 
     var token = tokens.Issue(room.TenantId, room.GameId, room.RoomId, request.PlayerId);
+
+    // Tell the client which node owns the room so it can connect directly to the owner (the connect
+    // path still redirects if it lands elsewhere). Surfaced as a header to keep the token body stable.
+    if (directory.TryGetOwner(new RoomKey(new TenantId(room.TenantId), new RoomId(room.RoomId)), out var owner))
+    {
+        ctx.Response.Headers["X-Citadel-Owner-Node"] = owner.Value;
+    }
+
     Audit(ctx, "mint-join-token", target, audit, clock);
     return Results.Created($"/realtime/v1/connect?joinToken={token.Token}", token);
 });
@@ -337,13 +440,6 @@ api.MapGet("/admin/rooms/{tenantId}/{roomId}/observe",
 // ============================================================================
 app.Map("/realtime/v1/connect", branch => branch.Run(async context =>
 {
-    if (!context.WebSockets.IsWebSocketRequest)
-    {
-        context.Response.StatusCode = StatusCodes.Status400BadRequest;
-        await context.Response.WriteAsJsonAsync(new ApiError("MalformedFrame", "A WebSocket upgrade is required."));
-        return;
-    }
-
     var joinToken = context.Request.Query["joinToken"].ToString();
     var verification = context.RequestServices.GetRequiredService<IJoinTokenVerifier>().Verify(joinToken);
     if (!verification.IsOk)
@@ -353,9 +449,39 @@ app.Map("/realtime/v1/connect", branch => branch.Run(async context =>
         return;
     }
 
+    // Room affinity: this connection must be handled by the node that owns the room. A connection that
+    // landed on a non-owner is redirected (409 + the owner's address) before any socket is accepted —
+    // this is what stops a non-owner from standing up a second authoritative copy of the room (split
+    // brain). Checked before the upgrade guard so a misrouted client is told where to go regardless.
+    var claims = verification.Claims!;
+    var roomKey = new RoomKey(new TenantId(claims.TenantId), new RoomId(claims.RoomId));
+    var directory = context.RequestServices.GetRequiredService<IRoomDirectory>();
+    var decision = context.RequestServices.GetRequiredService<IRoomAffinityRouter>().Resolve(roomKey);
+    if (decision.Kind == RouteKind.Redirect)
+    {
+        await WriteWrongNodeAsync(context, decision.Owner);
+        return;
+    }
+
+    if (!context.WebSockets.IsWebSocketRequest)
+    {
+        context.Response.StatusCode = StatusCodes.Status400BadRequest;
+        await context.Response.WriteAsJsonAsync(new ApiError("MalformedFrame", "A WebSocket upgrade is required."));
+        return;
+    }
+
+    // Resolve said local (we own it) or unowned. Secure ownership for this node — idempotent if already
+    // ours, a fresh claim if unowned. If we lose the claim race to another node, redirect to the winner.
+    if (!directory.TryClaim(roomKey, localNode))
+    {
+        directory.TryGetOwner(roomKey, out var owner);
+        await WriteWrongNodeAsync(context, owner);
+        return;
+    }
+
     using var socket = await context.WebSockets.AcceptWebSocketAsync();
     var transport = new ProtobufRealtimeTransport(
-        new AspNetRealtimeChannel(socket),
+        new AspNetRealtimeChannel(socket, maxFrameBytes),
         context.RequestServices.GetRequiredService<RealtimeProtobufCodec>(),
         context.RequestServices.GetRequiredService<RealtimeEnvelopeMapper>(),
         new ConnectionId(Guid.NewGuid().ToString("n")));
@@ -374,7 +500,14 @@ app.Map("/realtime/v1/connect", branch => branch.Run(async context =>
 }));
 
 // Dev/debug only: a JSON realtime codec for browser exploration. NOT the contract.
-if (app.Environment.IsDevelopment())
+// Gated by BOTH the environment and an explicit opt-in flag (defaults on in Development):
+// the AND with IsDevelopment is the hard guarantee that a production host can never expose
+// /ws (which trusts query-string identity with no token) or /sim/telemetry (which streams
+// aggregate telemetry), even if the flag is set. The flag lets a developer disable them
+// locally to exercise the production posture.
+var devEndpointsEnabled = app.Environment.IsDevelopment()
+    && app.Configuration.GetValue("Realtime:EnableDevEndpoints", true);
+if (devEndpointsEnabled)
 {
     // Live aggregate telemetry as Server-Sent Events for the simulation console
     // (wwwroot/sim.html). Read-only: it observes the same AggregatingTelemetrySink the
@@ -456,6 +589,20 @@ if (app.Environment.IsDevelopment())
 
 app.Run();
 
+// ---- Realtime affinity helper -----------------------------------------------
+// A connection that reached a node which does not own the room is told, with 409, the owner's
+// address to reconnect to. No socket is accepted; the body carries the owner so the client can retarget.
+static async Task WriteWrongNodeAsync(HttpContext context, NodeId owner)
+{
+    context.Response.StatusCode = StatusCodes.Status409Conflict;
+    await context.Response.WriteAsJsonAsync(new
+    {
+        error = "WrongNode",
+        message = "This room is owned by another node; reconnect to its owner.",
+        ownerNode = owner.Value,
+    });
+}
+
 // ---- Control-plane authorization + audit helpers ----------------------------
 // The group filter has already authenticated the caller into HttpContext.Items.
 
@@ -500,3 +647,16 @@ static IGameSimulation GameFor(GameId gameId) => gameId.Value switch
 // Exposes the top-level-statement entry point as a referencible type so integration tests
 // can boot the real host via WebApplicationFactory<Program>. No behavior; declaration only.
 public partial class Program;
+
+/// <summary>
+/// One control-plane API key as bound from configuration (ControlPlane:ApiKeys). Each entry
+/// maps a bearer key to the principal it grants. Used only outside Development, where keys
+/// must be supplied by configuration rather than hardcoded.
+/// </summary>
+public sealed class ApiKeyEntry
+{
+    public string? Key { get; set; }
+    public string? CallerId { get; set; }
+    public string? TenantId { get; set; }
+    public List<string>? Roles { get; set; }
+}

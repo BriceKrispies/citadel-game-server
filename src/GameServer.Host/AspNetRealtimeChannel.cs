@@ -12,11 +12,25 @@ namespace GameServer.Host;
 /// </summary>
 public sealed class AspNetRealtimeChannel : IRealtimeChannel
 {
+    /// <summary>Default cap on a single reassembled inbound message. A realtime command frame is
+    /// small; this bounds the memory one connection can force the server to buffer.</summary>
+    public const int DefaultMaxMessageBytes = 64 * 1024;
+
     private readonly WebSocket _socket;
     private readonly SemaphoreSlim _sendLock = new(1, 1);
     private readonly byte[] _receiveBuffer = new byte[8 * 1024];
+    private readonly int _maxMessageBytes;
 
-    public AspNetRealtimeChannel(WebSocket socket) => _socket = socket;
+    public AspNetRealtimeChannel(WebSocket socket, int maxMessageBytes = DefaultMaxMessageBytes)
+    {
+        if (maxMessageBytes <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(maxMessageBytes), maxMessageBytes, "Max message size must be positive.");
+        }
+
+        _socket = socket;
+        _maxMessageBytes = maxMessageBytes;
+    }
 
     public async Task<RealtimeInboundFrame> ReceiveAsync(CancellationToken cancellationToken)
     {
@@ -31,6 +45,15 @@ public sealed class AspNetRealtimeChannel : IRealtimeChannel
                     .ConfigureAwait(false);
 
                 if (result.MessageType == WebSocketMessageType.Close)
+                {
+                    return RealtimeInboundFrame.Closed;
+                }
+
+                // Bound reassembly BEFORE buffering: a client that streams an unbounded message
+                // (never setting EndOfMessage) would otherwise grow this MemoryStream until the
+                // process is OOM-killed. Once the cap is exceeded the message can never be valid,
+                // so stop reading and drop the connection (observable as a closed frame).
+                if (message.Length + result.Count > _maxMessageBytes)
                 {
                     return RealtimeInboundFrame.Closed;
                 }

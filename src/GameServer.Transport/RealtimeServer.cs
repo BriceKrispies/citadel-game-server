@@ -80,6 +80,11 @@ public sealed class RealtimeServer
     // established (post-hello) before it is reaped, so half-open/zombie sockets cannot accumulate.
     private readonly TimeSpan _handshakeTimeout;
     private readonly IIdleConnectionPolicy _idlePolicy;
+    // Cluster ownership: when wired, this node releases a room's directory claim as the room is reaped
+    // so ownership tracks live rooms (otherwise OwnedCount only grows). Null when clustering is not
+    // configured (e.g. unit harnesses) — then ownership is not touched here.
+    private readonly IRoomDirectory? _roomDirectory;
+    private readonly NodeId _localNode;
 
     // Admission counters. Guarded by _admissionLock (per-connection, not on the hot path).
     private readonly object _admissionLock = new();
@@ -103,9 +108,13 @@ public sealed class RealtimeServer
         AdmissionPolicy? admission = null,
         int eventLogRetentionTicks = 0,
         TimeSpan? handshakeTimeout = null,
-        IIdleConnectionPolicy? idlePolicy = null)
+        IIdleConnectionPolicy? idlePolicy = null,
+        IRoomDirectory? roomDirectory = null,
+        NodeId localNode = default)
     {
         _tenants = tenants;
+        _roomDirectory = roomDirectory;
+        _localNode = localNode;
         _router = router;
         _snapshots = snapshots;
         _events = events;
@@ -349,6 +358,9 @@ public sealed class RealtimeServer
                 _replicators.TryRemove(key, out _);
                 _roomLocks.TryRemove(key, out _);
                 _router.TryRemoveRoom(key);
+                // Relinquish cluster ownership as the room goes away, so OwnedCount tracks live rooms
+                // and another node can take this room later. No-op when clustering is not wired.
+                _roomDirectory?.Release(key, _localNode);
                 _telemetry.Event(TelemetryEvents.RoomClosed, Tags(("roomId", key.RoomId.Value), ("tenantId", key.TenantId.Value)));
             }
         }

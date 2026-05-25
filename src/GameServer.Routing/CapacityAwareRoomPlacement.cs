@@ -41,10 +41,17 @@ public sealed class CapacityAwareRoomPlacement : IRoomPlacement
     {
         lock (_gate)
         {
-            // Idempotent: a room already owned (by any node) keeps that owner.
+            // Idempotent for a LIVE owner: a room already owned by a node in the fleet keeps that owner.
+            // If it is owned by a node no longer in the fleet (scaled down / replaced), the claim is
+            // stale — release it and re-place on a live node rather than returning a dead address.
             if (_directory.TryGetOwner(room, out var existing))
             {
-                return RoomPlacementResult.OnNode(existing);
+                if (_nodes.Contains(existing))
+                {
+                    return RoomPlacementResult.OnNode(existing);
+                }
+
+                _directory.Release(room, existing);
             }
 
             foreach (var node in _nodes)

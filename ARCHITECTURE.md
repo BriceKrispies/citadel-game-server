@@ -133,3 +133,33 @@ Run (everything): `dotnet test Citadel.slnx`.
    (`IServerPushTransport`) over ASP.NET Core, swapped in without touching the kernel.
 7. **Persistence backends**: durable snapshot/event stores behind the existing
    generic contracts.
+
+## Horizontal scale: room ownership across a fleet
+
+A room is a single-owner authoritative actor, so a fleet must agree on exactly one owning node per
+`RoomKey` or it split-brains (the same room ticking on two nodes — pinned by
+`MultiNodeOwnershipScenario`). Three Routing ports cover this, each with a backend-agnostic contract:
+
+- **`IRoomDirectory`** — source of truth for room→owner. Atomic fenced claim, owner-gated release,
+  per-owner counts (`OwnedCount`). `NodeId.Value` is the node's reachable base address.
+- **`IRoomPlacement`** — assigns a room to one node, idempotently and capacity-aware, returning
+  `ClusterAtCapacity` when every node is full. Writes the directory.
+- **`IRoomAffinityRouter`** — resolves, for the local node, whether to serve a room or redirect to its
+  owner.
+
+Backends mirror the InMemory↔durable split used for snapshot stores:
+
+- `InMemoryRoomDirectory` / `CapacityAwareRoomPlacement` (Routing) — thread-safe, single-process
+  authoritative; used for a single node, for dev, and for tests that share one instance to model shared
+  infrastructure.
+- `RedisRoomDirectory` / `RedisRoomPlacement` (`GameServer.Cluster.Redis`) — real cross-node ownership:
+  fenced leased keys (`SET … NX PX`), per-node room sets scored by lease-expiry so counts self-exclude a
+  dead node's claims, and a single Lua script for atomic capacity-checked placement. Proven by
+  `RedisRoomDirectoryScenario` (Testcontainers; skipped without Docker).
+
+The Host (`Program.cs`) selects the backend by config (`Cluster:Backend` = InMemory|Redis, plus
+`Cluster:NodeId`, `Cluster:Nodes`, `Cluster:MaxRoomsPerNode`). Room creation places the room (`503` if
+the cluster is full); `/realtime/v1/connect` consults affinity before accepting the socket and answers
+`409` with the owner's address when a connection lands on a non-owner, so a non-owner never stands up a
+second copy of a room. End-to-end behavior is pinned by `ClusterRoutingHostScenario` (two Hosts sharing
+one directory).

@@ -14,17 +14,25 @@ public sealed class RedisRoomPlacement : IRoomPlacement
 {
     // ARGV[1]=member, ARGV[2]=cap, ARGV[3]=leaseMs, ARGV[4..]=node names; KEYS[1]=ownerKey, KEYS[2..]=per-node sets.
     private const string PlaceScript = @"
+local n = #KEYS - 1
 local cur = redis.call('GET', KEYS[1])
-if cur ~= false then return cur end
+if cur ~= false then
+  -- Idempotent only for a LIVE owner: if the room is owned by a node not in the current fleet
+  -- (scaled down / replaced), the claim is stale — drop it and re-place on a live node.
+  for i = 1, n do
+    if ARGV[i + 3] == cur then return cur end
+  end
+  redis.call('DEL', KEYS[1])
+end
 local t = redis.call('TIME')
 local now = (tonumber(t[1]) * 1000) + math.floor(tonumber(t[2]) / 1000)
 local cap = tonumber(ARGV[2])
 local lease = tonumber(ARGV[3])
-local n = #KEYS - 1
 for i = 1, n do
   local zkey = KEYS[i + 1]
-  local node = ARGV[i + 3]
-  if redis.call('ZCOUNT', zkey, now, '+inf') < cap then
+  redis.call('ZREMRANGEBYSCORE', zkey, '-inf', '(' .. now)
+  if redis.call('ZCARD', zkey) < cap then
+    local node = ARGV[i + 3]
     redis.call('SET', KEYS[1], node, 'PX', lease)
     redis.call('ZADD', zkey, now + lease, ARGV[1])
     return node
