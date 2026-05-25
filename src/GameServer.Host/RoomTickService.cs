@@ -29,6 +29,13 @@ public sealed class RoomTickService : ISupervisedWorker
     private readonly ITelemetrySink _telemetry;
     private readonly RoomScopedMetrics _roomMetrics;
     private readonly ILogger<RoomTickService> _logger;
+    // The observe→act loop for graceful degradation: each completed cycle's duration is recorded into a
+    // trailing window, then the ladder is fed the windowed missed-tick rate / tick p95 so it escalates
+    // under sustained overload and de-escalates as load subsides. The EDGE (RealtimeServer) reads the
+    // resulting level to shed optional load. Required in the deployed host (wired at the composition
+    // root); a unit harness may construct the service without it (then ticking does not degrade).
+    private readonly IDegradationController _degradation;
+    private readonly TickHealthWindow _health;
 
     public RoomTickService(
         RealtimeServer server,
@@ -36,6 +43,7 @@ public sealed class RoomTickService : ISupervisedWorker
         ITelemetrySink telemetry,
         RoomScopedMetrics roomMetrics,
         ILogger<RoomTickService> logger,
+        IDegradationController degradation,
         double tickHz = DefaultTickHz)
     {
         _server = server;
@@ -43,7 +51,11 @@ public sealed class RoomTickService : ISupervisedWorker
         _telemetry = telemetry;
         _roomMetrics = roomMetrics;
         _logger = logger;
+        _degradation = degradation;
         _tickInterval = IntervalForHz(tickHz);
+        // The window's budget is the tick interval: a cycle longer than the interval is, by definition,
+        // a missed tick. Sized so escalation/recovery react within a few seconds at the configured rate.
+        _health = new TickHealthWindow(_tickInterval.TotalMilliseconds);
     }
 
     /// <summary>The wall-clock interval between authoritative tick cycles (1 / Hz).</summary>
@@ -71,6 +83,10 @@ public sealed class RoomTickService : ISupervisedWorker
             var rooms = _server.ActiveRooms;
             if (rooms.Count == 0)
             {
+                // No work this cycle: record a zero-cost cycle and feed the ladder so a server that has
+                // drained back to idle recovers DOWN the degradation ladder instead of staying degraded.
+                _health.Record(0);
+                _degradation.Observe(_health.MissedTickRate, _health.TickP95Ms);
                 continue;
             }
 
@@ -82,6 +98,12 @@ public sealed class RoomTickService : ISupervisedWorker
                 // The cadence iteration did not fit in the tick budget.
                 _telemetry.Increment(TelemetryMetrics.MissedTicks);
             }
+
+            // Close the observe→act loop: record this cycle's cost and feed the windowed health signals to
+            // the degradation ladder. The ladder escalates immediately under overload and steps back down
+            // as the window clears, and the edge reads the resulting level to shed/restore optional load.
+            _health.Record(report.TotalElapsedMs);
+            _degradation.Observe(_health.MissedTickRate, _health.TickP95Ms);
 
             // Per-room tick cost (bounded cardinality): lets ops answer "which room is hot?",
             // which the global by-name telemetry cannot.

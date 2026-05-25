@@ -126,6 +126,19 @@ var admissionPolicy = new AdmissionPolicy(
     MaxConnectionsPerTenant: builder.Configuration.GetValue("Realtime:MaxConnectionsPerTenant", 25_000),
     MaxRooms: builder.Configuration.GetValue("Realtime:MaxRooms", 50_000),
     MaxRoomsPerTenant: builder.Configuration.GetValue("Realtime:MaxRoomsPerTenant", 10_000));
+// ---- Graceful degradation ladder (Wave 6) -----------------------------------
+// The authoritative cadence is needed up front: it is BOTH the tick driver's interval AND the
+// degradation controller's per-tick budget (a cycle longer than the interval is a missed tick). Read it
+// here so the controller, the RealtimeServer edge, and the tick driver all agree on one budget.
+var tickHz = builder.Configuration.GetValue("Realtime:TickHz", RoomTickService.DefaultTickHz);
+var tickBudgetMs = RoomTickService.IntervalForHz(tickHz).TotalMilliseconds;
+// The ladder turns the tick driver's observed health (missed_ticks / tick p95) into an explicit, ordered
+// decision (reduce spectator snapshots → shed telemetry → reject new rooms → reject new connections), with
+// immediate escalation and one-step hysteresis on recovery so it never flaps. Registered as a REQUIRED
+// singleton (not a dormant null-guarded seam): the tick driver feeds it and the realtime edge consults it
+// on the hot path — both resolve it from DI, so it is always non-null in the deployed host.
+builder.Services.AddSingleton<IDegradationController>(_ => new LadderDegradationController(tickBudgetMs));
+
 // Per-game replication policy comes from the control-plane catalog (registered below).
 builder.Services.AddSingleton<RealtimeServer>(sp => new RealtimeServer(
     sp.GetRequiredService<ITenantResolver>(),
@@ -151,7 +164,11 @@ builder.Services.AddSingleton<RealtimeServer>(sp => new RealtimeServer(
     // Defense-in-depth behind the transport frame cap (Realtime:MaxFrameBytes): a decoded command
     // larger than this is shed with a typed error and the connection survives. Defaults to the frame
     // cap so the two bounds agree; a single value keeps the story simple.
-    maxCommandBytes: builder.Configuration.GetValue("Realtime:MaxCommandBytes", AspNetRealtimeChannel.DefaultMaxMessageBytes)));
+    maxCommandBytes: builder.Configuration.GetValue("Realtime:MaxCommandBytes", AspNetRealtimeChannel.DefaultMaxMessageBytes),
+    // Graceful-degradation ladder, consulted ON the hot path (HandleConnectionAsync / HandleJoinAsync /
+    // TickRoom): refuse new connections/rooms and shed optional telemetry/spectator pushes under sustained
+    // tick overload, never the authoritative simulation. Required here; the tick driver feeds it.
+    degradation: sp.GetRequiredService<IDegradationController>()));
 // Rooms are independent state owners, so tick them concurrently across all cores; one
 // slow room must not block the rest (head-of-line blocking).
 builder.Services.AddSingleton<IRoomTickScheduler>(_ => ParallelRoomTickScheduler.ForProcessorCount());
@@ -176,14 +193,15 @@ builder.Services.AddSingleton<ITenantRateLimiter>(sp => new TokenBucketTenantRat
 // unhandled fault stop the whole host, and drains them within a bounded budget on shutdown.
 // Authoritative cadence is configurable (Realtime:TickHz, default 10 Hz) so a scenario can
 // drive 30 Hz without recompiling; the simulation kernel stays wall-clock-free — only this
-// host-side driver knows the rate.
-var tickHz = builder.Configuration.GetValue("Realtime:TickHz", RoomTickService.DefaultTickHz);
+// host-side driver knows the rate. The driver also closes the degradation observe→act loop:
+// it feeds each cycle's health to the ladder it shares with the edge (tickHz read above).
 builder.Services.AddSingleton<RoomTickService>(sp => new RoomTickService(
     sp.GetRequiredService<RealtimeServer>(),
     sp.GetRequiredService<IRoomTickScheduler>(),
     sp.GetRequiredService<ITelemetrySink>(),
     sp.GetRequiredService<RoomScopedMetrics>(),
     sp.GetRequiredService<ILogger<RoomTickService>>(),
+    sp.GetRequiredService<IDegradationController>(),
     tickHz));
 builder.Services.AddSingleton<ISupervisedWorker>(sp => sp.GetRequiredService<RoomTickService>());
 builder.Services.AddSingleton<TelemetryFlushService>();
@@ -741,6 +759,7 @@ api.MapGet("/admin/rooms/{tenantId}/{roomId}/observe",
     using var timer = new PeriodicTimer(TimeSpan.FromMilliseconds(250));
     using var streamLifetime = CancellationTokenSource.CreateLinkedTokenSource(token, lifetime.ApplicationStopping);
     var streamToken = streamLifetime.Token;
+    var streamTick = 0L;
 
     try
     {
@@ -751,6 +770,15 @@ api.MapGet("/admin/rooms/{tenantId}/{roomId}/observe",
                 await ctx.Response.WriteAsync("event: gone\ndata: {}\n\n", streamToken);
                 await ctx.Response.Body.FlushAsync(streamToken);
                 break;
+            }
+
+            // This admin "drop-in" feed is OPTIONAL server-push (a spectator/observer view, not an
+            // authoritative client). The degradation ladder's first, cheapest rung thins it under
+            // overload (ReduceSpectatorSnapshots+ halves the rate) so fan-out budget is reclaimed before
+            // any authoritative work is touched; the timer still ticks so the stream stays alive.
+            if (!server.ShouldEmitSpectatorSnapshot(streamTick++))
+            {
+                continue;
             }
 
             await ctx.Response.WriteAsync($"data: {JsonSerializer.Serialize(observation, json)}\n\n", streamToken);

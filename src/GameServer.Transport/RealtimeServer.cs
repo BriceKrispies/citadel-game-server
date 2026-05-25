@@ -104,6 +104,17 @@ public sealed class RealtimeServer
     // a typed ServerError and the connection SURVIVES — one bad frame is not a disconnect.
     private readonly int _maxCommandBytes;
 
+    // Graceful-degradation ladder. Null when not configured (unit harnesses): then the server runs at
+    // full service. When wired (the deployed host — see Program.cs), the tick driver feeds it the
+    // observed tick health (missed_ticks / tick p95) and the EDGE consults its current level ON the hot
+    // path to shed OPTIONAL load before authoritative correctness is at risk: at RejectNewConnections it
+    // refuses new connections, at RejectNewRooms it refuses joins that would CREATE a new room, at
+    // ShedTelemetry it drops the non-critical per-message structured events, and at
+    // ReduceSpectatorSnapshots it thins the observer/spectator push (see ShouldEmitSpectatorSnapshot).
+    // It NEVER skips the authoritative tick, state mutation, or snapshot/event persistence: correctness
+    // outranks accepting load. Wired only at the composition root.
+    private readonly IDegradationController? _degradation;
+
     // Admission counters. Guarded by _admissionLock (per-connection, not on the hot path).
     private readonly object _admissionLock = new();
     private readonly Dictionary<string, int> _connectionsPerTenant = new();
@@ -131,7 +142,8 @@ public sealed class RealtimeServer
         NodeId localNode = default,
         ITenantRateLimiter? rateLimiter = null,
         ITenantMetricsSink? tenantMetrics = null,
-        int maxCommandBytes = 0)
+        int maxCommandBytes = 0,
+        IDegradationController? degradation = null)
     {
         _tenants = tenants;
         _roomDirectory = roomDirectory;
@@ -139,6 +151,7 @@ public sealed class RealtimeServer
         _rateLimiter = rateLimiter;
         _tenantMetrics = tenantMetrics;
         _maxCommandBytes = maxCommandBytes;
+        _degradation = degradation;
         _router = router;
         _snapshots = snapshots;
         _events = events;
@@ -183,6 +196,24 @@ public sealed class RealtimeServer
     /// confirm the deployed host actually configured ceilings rather than running unbounded.
     /// </summary>
     public AdmissionPolicy Admission => _admission;
+
+    /// <summary>
+    /// The current graceful-degradation level the data plane is shedding at (<see cref="DegradationLevel.Normal"/>
+    /// when no controller is wired). The tick driver feeds the controller; the edge reads this to shed optional
+    /// load. Exposed so operators (and scenarios) can observe the ladder position without reaching into the
+    /// controller.
+    /// </summary>
+    public DegradationLevel DegradationLevel => _degradation?.Current ?? DegradationLevel.Normal;
+
+    /// <summary>
+    /// Whether an OPTIONAL spectator/observer push (e.g. the admin "drop-in" observe stream) should emit on
+    /// the given monotonically increasing stream tick. At <see cref="DegradationLevel.ReduceSpectatorSnapshots"/>
+    /// or higher the spectator rate is halved (emit on even ticks only) to reclaim fan-out budget; below it,
+    /// every tick emits. This NEVER affects authoritative players — it only thins the non-authoritative
+    /// observer push, the cheapest, most optional work, shed first on the ladder.
+    /// </summary>
+    public bool ShouldEmitSpectatorSnapshot(long streamTick) =>
+        DegradationLevel < DegradationLevel.ReduceSpectatorSnapshots || (streamTick % 2) == 0;
 
     /// <summary>
     /// Drives one connection until its client side completes, processing each
@@ -282,6 +313,15 @@ public sealed class RealtimeServer
 
     private bool TryAdmitConnection(string tenant, out string reason)
     {
+        // Graceful-degradation last rung: under sustained overload the ladder refuses NEW connections
+        // (existing ones keep being served) so the tick loop can reclaim headroom before authoritative
+        // correctness is at risk. Read on the hot connect path; a no-op at every level below the top.
+        if (DegradationLevel >= DegradationLevel.RejectNewConnections)
+        {
+            reason = "degraded_reject_connections";
+            return false;
+        }
+
         lock (_admissionLock)
         {
             if (_connectionCount >= _admission.MaxConnections)
@@ -624,7 +664,27 @@ public sealed class RealtimeServer
         }
 
         _telemetry.Increment(TelemetryMetrics.SnapshotsEmitted);
-        _telemetry.Event(TelemetryEvents.SnapshotEmitted, Tags(("roomId", key.RoomId.Value), ("tick", result.Snapshot.Tick.ToString())));
+        // The per-snapshot structured event is NON-CRITICAL diagnostic detail (the counter above is the
+        // SLO-bearing signal and is always emitted). Under ShedTelemetry+ the ladder drops it to reclaim
+        // CPU on the hottest path; authoritative state and the snapshot itself are unaffected.
+        EmitNonCriticalEvent(TelemetryEvents.SnapshotEmitted, Tags(("roomId", key.RoomId.Value), ("tick", result.Snapshot.Tick.ToString())));
+    }
+
+    /// <summary>
+    /// Emits a NON-CRITICAL structured event unless the degradation ladder is at
+    /// <see cref="DegradationLevel.ShedTelemetry"/> or higher, in which case it is dropped to reclaim CPU
+    /// under sustained overload. SLO-bearing counters/measures are emitted unconditionally elsewhere; only
+    /// the optional per-message diagnostic events go through here, so shedding telemetry never blinds the
+    /// core metrics and never touches authoritative simulation.
+    /// </summary>
+    private void EmitNonCriticalEvent(string name, IReadOnlyDictionary<string, string> fields)
+    {
+        if (DegradationLevel >= DegradationLevel.ShedTelemetry)
+        {
+            return;
+        }
+
+        _telemetry.Event(name, fields);
     }
 
     private async Task ProcessAsync(Connection connection, MessageEnvelope inbound, CancellationToken cancellationToken)
@@ -748,11 +808,19 @@ public sealed class RealtimeServer
         lock (RoomLock(key))
         {
             var isNewRoom = !_subscribers.ContainsKey(key);
+            // Graceful-degradation rung below refusing connections: under overload the ladder refuses
+            // joins that would CREATE a NEW room (existing rooms keep ticking and accepting rejoins), so
+            // the tick loop stops taking on more authoritative work while it is already over budget.
+            // Joins into an already-running room are never refused by degradation — only new load is.
+            if (isNewRoom && DegradationLevel >= DegradationLevel.RejectNewRooms)
+            {
+                rejectReason = "degraded_reject_rooms";
+            }
             // A join that would create a NEW room is checked against both the global ceiling and
             // the per-tenant ceiling, so one tenant cannot consume global room capacity and
             // starve the others (noisy-neighbour isolation). Joins into an already-running room
             // never count against a ceiling.
-            if (isNewRoom && TenantRoomCount(session.Tenant.TenantId) >= _admission.MaxRoomsPerTenant)
+            else if (isNewRoom && TenantRoomCount(session.Tenant.TenantId) >= _admission.MaxRoomsPerTenant)
             {
                 rejectReason = "tenant_max_rooms";
             }

@@ -1,0 +1,42 @@
+{
+  // Wave 6 — ADMIN-UNDER-LOAD. A heavy realtime command flood runs while an operator hammers the
+  // read-only admin/control plane (GET /api/v1/admin/rooms, the /observe SSE drop-in). The harness
+  // ALREADY polls GET /api/v1/admin/rooms twice a second during the run (see ServerRoomVerifier), so
+  // running this high-rate scenario exercises exactly that contention: control-plane reads must NOT
+  // starve the authoritative hot path, and the hot path must NOT starve admin reads.
+  //
+  // To generate real operator load alongside this, run in parallel (a separate shell), continuously:
+  //   while true; do curl -s -H "Authorization: Bearer dev-admin-key" \
+  //     http://localhost:5000/api/v1/admin/rooms > /dev/null; done
+  // and/or attach an SSE observer:
+  //   curl -N -H "Authorization: Bearer dev-admin-key" \
+  //     http://localhost:5000/api/v1/admin/rooms/tenant-a/<roomId>/observe
+  //
+  // PASS CRITERIA:
+  //   - serverRoomVerification in result.json populated throughout (admin reads kept answering under the
+  //     flood — they were not starved by the realtime path).
+  //   - admin /observe stream stays alive; under sustained overload its rate THINS (ReduceSpectatorSnapshots
+  //     rung) rather than the stream dying or blocking the tick (it is OPTIONAL server-push).
+  //   - tick_duration_ms p95 and accepted-command rate are NOT degraded by the admin polling (admin reads
+  //     are CHEAP and off the hot path) — the authoritative path keeps its SLO.
+  "name": "admin-under-load",
+  "scenarioType": "sustained-input",
+  "serverUrl": "http://localhost:5000",
+  "joinTokenMode": "ControlPlane",
+  "apiKey": "dev-tenant-a-key",
+  "tenantId": "tenant-a",
+  "gameId": "demo-game",
+  "command": "MoveRight",
+  "roomCount": 20,
+  "clientsPerRoom": 20,
+  "totalClients": 400,
+  "rampUpDuration": 10,
+  "steadyStateDuration": 60,
+  "inputRatePerClientPerSecond": 100,
+  "snapshotAckMode": "EverySnapshot",
+  "pingInterval": 5,
+  "reconnectMode": "None",
+  "malformedClientPercent": 0,
+  "slowReceiverPercent": 0,
+  "outputDirectory": "load/results/admin-under-load"
+}

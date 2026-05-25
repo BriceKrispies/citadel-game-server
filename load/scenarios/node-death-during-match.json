@@ -1,0 +1,42 @@
+{
+  // Wave 6 — NODE-DEATH-DURING-MATCH survivability drill. A sustained match runs while one fleet node
+  // is killed mid-flight. With the Wave-4 cluster (Redis directory + capacity-aware placement +
+  // RoomLeaseRenewalService) and durable snapshots, the killed node's rooms become reclaimable when its
+  // lease lapses, another node claims+recovers them, and a reconnecting client (reconnectMode:
+  // OnUnexpectedClose) is redirected (409 -> X-Citadel-Owner-Node) to the survivor and rejoins.
+  //
+  // The automated, hermetic proof is the integration test NodeDeathSurvivableScenario.NodeDeathSurvivable
+  // (Redis-gated [SkippableFact]) — it asserts ownership migrates and authoritative state is recovered to
+  // its pre-death tick. THIS scenario is the multi-node SOAK drill against a real fleet:
+  //   1. Run a multi-node host (Cluster:Backend=Redis, Cluster:Nodes=[node-a, node-b], Persistence durable),
+  //      with this scenario's serverUrl pointed at the fleet's entry point / load balancer.
+  //   2. Mid-steady-state, kill one node's process (or `POST /api/v1/admin/nodes/{id}/drain` for a clean
+  //      drain; a kill exercises the lease-lapse path).
+  //
+  // PASS CRITERIA (result.json):
+  //   - reconnects > 0 and clientsConnected recovers to ~totalClients after the kill (clients migrated).
+  //   - no permanent connection loss: the dip is transient; rooms are not lost (serverRoomVerification on
+  //     the surviving node shows the migrated rooms still active at a tick >= their pre-death tick).
+  //   - serverErrors during the failover window are transient (retryable WrongNode/Overloaded), not a
+  //     cliff; authoritative state is never reset (recovered from the durable checkpoint).
+  "name": "node-death-during-match",
+  "scenarioType": "sustained-input",
+  "serverUrl": "http://localhost:5000",
+  "joinTokenMode": "ControlPlane",
+  "apiKey": "dev-tenant-a-key",
+  "tenantId": "tenant-a",
+  "gameId": "demo-game",
+  "command": "MoveRight",
+  "roomCount": 20,
+  "clientsPerRoom": 10,
+  "totalClients": 200,
+  "rampUpDuration": 10,
+  "steadyStateDuration": 90,
+  "inputRatePerClientPerSecond": 10,
+  "snapshotAckMode": "EverySnapshot",
+  "pingInterval": 5,
+  "reconnectMode": "OnUnexpectedClose",
+  "malformedClientPercent": 0,
+  "slowReceiverPercent": 0,
+  "outputDirectory": "load/results/node-death-during-match"
+}

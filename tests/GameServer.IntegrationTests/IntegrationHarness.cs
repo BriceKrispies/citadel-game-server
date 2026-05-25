@@ -29,7 +29,8 @@ public sealed class IntegrationHarness
         int eventLogRetentionTicks = 0,
         ITenantRateLimiter? rateLimiter = null,
         ITenantMetricsSink? tenantMetrics = null,
-        int maxCommandBytes = 0)
+        int maxCommandBytes = 0,
+        IDegradationController? degradation = null)
     {
         var contexts = (tenants ?? new[] { "tenant-a" })
             .Select(t => new TenantContext(new TenantId(t), $"Tenant {t}"));
@@ -43,7 +44,8 @@ public sealed class IntegrationHarness
         Telemetry = new AggregatingTelemetrySink();
         Server = new RealtimeServer(
             Tenants, Router, Snapshots, Events, Telemetry, policy, lifecycle, admission, eventLogRetentionTicks,
-            rateLimiter: rateLimiter, tenantMetrics: tenantMetrics, maxCommandBytes: maxCommandBytes);
+            rateLimiter: rateLimiter, tenantMetrics: tenantMetrics, maxCommandBytes: maxCommandBytes,
+            degradation: degradation);
     }
 
     public InMemoryTenantResolver Tenants { get; }

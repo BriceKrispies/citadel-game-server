@@ -1,0 +1,33 @@
+{
+  // Wave 6 — MULTI-TENANT isolation under stress (the QUIET tenant). Run CONCURRENTLY with
+  // multi-tenant.json. tenant-b sends a modest, in-budget stream while tenant-a runs its combined
+  // overload. This is where the isolation EVIDENCE is read: with per-tenant rate limiting + per-tenant
+  // room caps enforced and degradation shedding NEW load first, tenant-b's reject rate (serverErrors in
+  // THIS result.json) must stay ~flat and every tenant-b room must keep ticking — regardless of how hard
+  // tenant-a is hammered or shed. If tenant-b's rejects climb in lockstep with tenant-a's flood, an
+  // isolation control is leaking across tenants.
+  //
+  // PASS CRITERIA: serverErrors ~flat across the run, clientsConnected == totalClients, every room's
+  //   server-side subscriberCount verified (serverRoomVerification populated) — tenant-b's SLO preserved
+  //   under tenant-a's stress.
+  "name": "multi-tenant-quiet",
+  "scenarioType": "sustained-input",
+  "serverUrl": "http://localhost:5000",
+  "joinTokenMode": "ControlPlane",
+  "apiKey": "dev-tenant-b-key",
+  "tenantId": "tenant-b",
+  "gameId": "demo-game",
+  "command": "MoveRight",
+  "roomCount": 10,
+  "clientsPerRoom": 10,
+  "totalClients": 100,
+  "rampUpDuration": 10,
+  "steadyStateDuration": 45,
+  "inputRatePerClientPerSecond": 5,
+  "snapshotAckMode": "EverySnapshot",
+  "pingInterval": 5,
+  "reconnectMode": "None",
+  "malformedClientPercent": 0,
+  "slowReceiverPercent": 0,
+  "outputDirectory": "load/results/multi-tenant-quiet"
+}

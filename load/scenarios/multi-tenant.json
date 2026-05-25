@@ -1,0 +1,40 @@
+{
+  // Wave 6 — MULTI-TENANT isolation under stress (the NOISY tenant). Run CONCURRENTLY with
+  // multi-tenant-quiet.json (a DIFFERENT tenant against the same host). tenant-a runs a combined
+  // overload — a large fleet of rooms AND a command flood far past its per-tenant token bucket — to
+  // stress every Wave-1 isolation control at once: the per-tenant rate limiter, the per-tenant room cap,
+  // and (if the tick loop saturates) the degradation ladder.
+  //
+  // The PROOF of isolation lives in the QUIET companion's result.json: tenant-b sends a modest, in-budget
+  // stream and its serverErrors / reject rate MUST stay ~flat while tenant-a is hammered and (possibly)
+  // shed. Degradation, rate limiting, and room caps are all enforced per-tenant or shed NEW load first, so
+  // one tenant's storm can never raise another tenant's reject rate or stop its rooms ticking.
+  //
+  // PASS CRITERIA (this side): tenant-a's overflow is shed as ERROR_CODE_BACKPRESSURE_REJECTED (rate
+  //   limiter) and/or Overloaded (degradation rung), the authoritative simulation never corrupts, and
+  //   accepted commands still advance.
+  // PASS CRITERIA (quiet side): tenant-b serverErrors ~flat, clientsConnected == totalClients, every
+  //   tenant-b room keeps ticking (serverRoomVerification populated) — isolation held under stress.
+  // The command path MUST use ClientCommand (this harness does); ClientInputFrame is discarded by the
+  // server and does not count as liveness (idle reap).
+  "name": "multi-tenant",
+  "scenarioType": "sustained-input",
+  "serverUrl": "http://localhost:5000",
+  "joinTokenMode": "ControlPlane",
+  "apiKey": "dev-tenant-a-key",
+  "tenantId": "tenant-a",
+  "gameId": "demo-game",
+  "command": "MoveRight",
+  "roomCount": 30,
+  "clientsPerRoom": 20,
+  "totalClients": 600,
+  "rampUpDuration": 10,
+  "steadyStateDuration": 45,
+  "inputRatePerClientPerSecond": 300,
+  "snapshotAckMode": "EverySnapshot",
+  "pingInterval": 5,
+  "reconnectMode": "None",
+  "malformedClientPercent": 0,
+  "slowReceiverPercent": 0,
+  "outputDirectory": "load/results/multi-tenant"
+}

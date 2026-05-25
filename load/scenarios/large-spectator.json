@@ -1,0 +1,36 @@
+{
+  // Wave 6 — LARGE-SPECTATOR fan-out under load. Many clients packed into a few rooms drive the
+  // replication fan-out (interest -> delta -> budget) and the optional spectator/observer push hard.
+  // This is the scenario the degradation ladder's FIRST rung (ReduceSpectatorSnapshots) exists for: if
+  // the tick loop starts blowing its budget, the server thins the OPTIONAL observer push (and the admin
+  // /observe stream) before it ever touches authoritative players.
+  //
+  // PASS CRITERIA (read result.json + the server's /sim/telemetry):
+  //   - clientsConnected == totalClients (all 500 spectators admitted while service is Normal).
+  //   - serverErrors / overload rejections stay ~0 for the authoritative players (degradation sheds
+  //     OPTIONAL push first; it must never reject a joined player's commands as a side effect).
+  //   - tick_duration_ms p95 stays under the tick budget OR, if it exceeds it, missed_ticks rises AND
+  //     the degradation level escalates (spectator push thins) — never a hard cliff of dropped players.
+  //   - serverRoomVerification: every room's server-side subscriberCount matches the clients that joined
+  //     it (no spectator was silently dropped from authoritative membership; only its PUSH rate thins).
+  "name": "large-spectator",
+  "scenarioType": "room-fanout",
+  "serverUrl": "http://localhost:5000",
+  "joinTokenMode": "ControlPlane",
+  "apiKey": "dev-tenant-a-key",
+  "tenantId": "tenant-a",
+  "gameId": "demo-game",
+  "command": "MoveRight",
+  "roomCount": 5,
+  "clientsPerRoom": 100,
+  "totalClients": 500,
+  "rampUpDuration": 15,
+  "steadyStateDuration": 60,
+  "inputRatePerClientPerSecond": 10,
+  "snapshotAckMode": "EverySnapshot",
+  "pingInterval": 5,
+  "reconnectMode": "None",
+  "malformedClientPercent": 0,
+  "slowReceiverPercent": 0,
+  "outputDirectory": "load/results/large-spectator"
+}
