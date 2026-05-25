@@ -1,0 +1,67 @@
+{
+  "tracer": "R-realtime",
+  "provenance": "Traced by team agent R; reconciled against source by synthesizer.",
+  "nodes": [
+    { "id": "Program:/realtime/v1/connect", "file": "src/GameServer.Host/Program.cs", "assembly": "GameServer.Host", "ring": "composition-root", "kind": "entry", "summary": "Binary WS endpoint; verifies join token, applies affinity/placement gates before accepting socket." },
+    { "id": "Program:/ws", "file": "src/GameServer.Host/Program.cs", "assembly": "GameServer.Host", "ring": "composition-root", "kind": "entry", "summary": "Dev text WS; fabricates principal from query string. Double-gated by IsDevelopment AND Realtime:EnableDevEndpoints." },
+    { "id": "IJoinTokenVerifier.Verify", "file": "src/GameServer.Abstractions/Identity", "assembly": "GameServer.Abstractions", "ring": 0, "kind": "port", "summary": "Verifies signed join token -> JoinTokenClaims (trusted tenant/game/room/player)." },
+    { "id": "IRoomAffinityRouter.Resolve", "file": "src/GameServer.Routing", "assembly": "GameServer.Routing", "ring": 2, "kind": "port", "summary": "409 redirect if this node is not the room owner." },
+    { "id": "IRoomPlacement.Place", "file": "src/GameServer.Routing", "assembly": "GameServer.Routing", "ring": 2, "kind": "port", "summary": "Assigns/locates owning node." },
+    { "id": "AspNetRealtimeChannel", "file": "src/GameServer.Host/AspNetRealtimeChannel.cs", "assembly": "GameServer.Host", "ring": "composition-root", "kind": "adapter", "summary": "Wraps WebSocket; enforces binary frames, caps reassembly at maxFrameBytes (default 64KB)." },
+    { "id": "AspNetWebSocketChannel", "file": "src/GameServer.Host/AspNetWebSocketChannel.cs", "assembly": "GameServer.Host", "ring": "composition-root", "kind": "adapter", "summary": "Dev text channel." },
+    { "id": "ProtobufRealtimeTransport.ReceiveAsync", "file": "src/GameServer.Transport/ProtobufRealtimeTransport.cs", "assembly": "GameServer.Transport", "ring": 3, "kind": "adapter", "summary": "Decodes protobuf -> kernel envelope; rejects text frames." },
+    { "id": "RealtimeProtobufCodec.Decode", "file": "src/GameServer.Protocol", "assembly": "GameServer.Protocol", "ring": 0, "kind": "terminal", "summary": "Ring-0 codec; wire bytes -> typed envelope." },
+    { "id": "RealtimeEnvelopeMapper.MapClient", "file": "src/GameServer.Transport/RealtimeEnvelopeMapper.cs", "assembly": "GameServer.Transport", "ring": 3, "kind": "adapter", "summary": "ToKernel copies wire tenant/room/player verbatim (UNTRUSTED); handlers re-validate. MapServer default throws on unmappable payload." },
+    { "id": "RealtimeServer.HandleConnectionAsync", "file": "src/GameServer.Transport/RealtimeServer.cs", "assembly": "GameServer.Transport", "ring": 3, "kind": "entry", "summary": "Connection lifecycle entry." },
+    { "id": "RealtimeServer.ProcessAsync", "file": "src/GameServer.Transport/RealtimeServer.cs", "assembly": "GameServer.Transport", "ring": 3, "kind": "handler", "summary": "Typed dispatch over MessageType (explicit default)." },
+    { "id": "RealtimeServer.HandleHelloAsync", "file": "src/GameServer.Transport/RealtimeServer.cs", "assembly": "GameServer.Transport", "ring": 3, "kind": "handler", "summary": "Protocol-version + tenant + game check." },
+    { "id": "RealtimeServer.HandleJoinAsync", "file": "src/GameServer.Transport/RealtimeServer.cs", "assembly": "GameServer.Transport", "ring": 3, "kind": "handler", "summary": "Token-scope validation; builds RoomKey from session.Tenant.TenantId (NOT inbound); admission + replicator setup." },
+    { "id": "RealtimeServer.HandleCommandAsync", "file": "src/GameServer.Transport/RealtimeServer.cs", "assembly": "GameServer.Transport", "ring": 3, "kind": "handler", "summary": "Uses connection.Player (bound at validated join), NOT inbound.PlayerId; enqueues intent." },
+    { "id": "RealtimeServer.HandleAckAsync", "file": "src/GameServer.Transport/RealtimeServer.cs", "assembly": "GameServer.Transport", "ring": 3, "kind": "handler", "summary": "Advances delta baseline." },
+    { "id": "ITenantResolver.TryResolve", "file": "src/GameServer.Abstractions/Tenancy", "assembly": "GameServer.Abstractions", "ring": 0, "kind": "port", "summary": "Resolves tenant once at hello -> Session.Tenant (trusted source)." },
+    { "id": "ITenantRateLimiter.TryAcquire", "file": "src/GameServer.Abstractions", "assembly": "GameServer.Abstractions", "ring": 0, "kind": "port", "summary": "Per-tenant rate limiting (sheds as BackpressureRejections)." },
+    { "id": "GameRoom.TryEnqueue", "file": "src/GameServer.Simulation/GameRoom.cs", "assembly": "GameServer.Simulation", "ring": 1, "kind": "owner", "summary": "Validates membership/sequence/legality BEFORE queuing; bounded _pending (1024) sheds RejectedOverloaded." },
+    { "id": "GameRoom.Tick", "file": "src/GameServer.Simulation/GameRoom.cs", "assembly": "GameServer.Simulation", "ring": 1, "kind": "owner", "summary": "Drains queue, applies on tick. ONLY caller of _game.Apply." },
+    { "id": "IGameSimulation.Apply", "file": "src/GameServer.Abstractions/Simulation", "assembly": "GameServer.Abstractions", "ring": 0, "kind": "terminal", "summary": "Authoritative kernel boundary. STOP." },
+    { "id": "ITelemetrySink", "file": "src/GameServer.Abstractions/Observability", "assembly": "GameServer.Abstractions", "ring": 0, "kind": "sink", "summary": "Telemetry sink. STOP." }
+  ],
+  "edges": [
+    { "from": "Program:/realtime/v1/connect", "to": "IJoinTokenVerifier.Verify", "kind": "calls" },
+    { "from": "Program:/realtime/v1/connect", "to": "IRoomAffinityRouter.Resolve", "kind": "calls" },
+    { "from": "Program:/realtime/v1/connect", "to": "IRoomPlacement.Place", "kind": "calls" },
+    { "from": "Program:/realtime/v1/connect", "to": "AspNetRealtimeChannel", "kind": "calls" },
+    { "from": "AspNetRealtimeChannel", "to": "ProtobufRealtimeTransport.ReceiveAsync", "kind": "calls" },
+    { "from": "ProtobufRealtimeTransport.ReceiveAsync", "to": "RealtimeProtobufCodec.Decode", "kind": "calls" },
+    { "from": "ProtobufRealtimeTransport.ReceiveAsync", "to": "RealtimeEnvelopeMapper.MapClient", "kind": "calls" },
+    { "from": "Program:/ws", "to": "AspNetWebSocketChannel", "kind": "calls" },
+    { "from": "AspNetWebSocketChannel", "to": "RealtimeServer.HandleConnectionAsync", "kind": "calls" },
+    { "from": "RealtimeServer.HandleConnectionAsync", "to": "RealtimeServer.ProcessAsync", "kind": "calls" },
+    { "from": "RealtimeServer.ProcessAsync", "to": "RealtimeServer.HandleHelloAsync", "kind": "dispatches" },
+    { "from": "RealtimeServer.ProcessAsync", "to": "RealtimeServer.HandleJoinAsync", "kind": "dispatches" },
+    { "from": "RealtimeServer.ProcessAsync", "to": "RealtimeServer.HandleCommandAsync", "kind": "dispatches" },
+    { "from": "RealtimeServer.ProcessAsync", "to": "RealtimeServer.HandleAckAsync", "kind": "dispatches" },
+    { "from": "RealtimeServer.HandleHelloAsync", "to": "ITenantResolver.TryResolve", "kind": "calls" },
+    { "from": "RealtimeServer.HandleJoinAsync", "to": "GameRoom.TryEnqueue", "kind": "enqueues" },
+    { "from": "RealtimeServer.HandleCommandAsync", "to": "ITenantRateLimiter.TryAcquire", "kind": "calls" },
+    { "from": "RealtimeServer.HandleCommandAsync", "to": "GameRoom.TryEnqueue", "kind": "enqueues" },
+    { "from": "GameRoom.TryEnqueue", "to": "GameRoom.Tick", "kind": "enqueues" },
+    { "from": "GameRoom.Tick", "to": "IGameSimulation.Apply", "kind": "calls" },
+    { "from": "RealtimeServer.ProcessAsync", "to": "ITelemetrySink", "kind": "emits" }
+  ],
+  "surfaces": [
+    { "surface": "/realtime/v1/connect", "type": "websocket-binary", "auth": "join-token", "entry": "RealtimeServer.HandleConnectionAsync", "trace": ["Program:/realtime/v1/connect", "IJoinTokenVerifier.Verify", "IRoomAffinityRouter.Resolve", "IRoomPlacement.Place", "AspNetRealtimeChannel", "ProtobufRealtimeTransport.ReceiveAsync", "RealtimeProtobufCodec.Decode", "RealtimeEnvelopeMapper.MapClient", "RealtimeServer.HandleConnectionAsync", "RealtimeServer.ProcessAsync", "RealtimeServer.HandleJoinAsync", "RealtimeServer.HandleCommandAsync", "GameRoom.TryEnqueue", "GameRoom.Tick", "IGameSimulation.Apply"], "stopsAt": "IGameSimulation.Apply", "invariantsTouched": ["tenant-isolation", "backpressure", "protocol-typing", "observability", "authoritative-intent"] },
+    { "surface": "/ws", "type": "websocket-text-dev", "auth": "none (dev-gated: IsDevelopment AND Realtime:EnableDevEndpoints)", "entry": "RealtimeServer.HandleConnectionAsync", "trace": ["Program:/ws", "AspNetWebSocketChannel", "RealtimeServer.HandleConnectionAsync", "RealtimeServer.ProcessAsync", "GameRoom.TryEnqueue", "GameRoom.Tick", "IGameSimulation.Apply"], "stopsAt": "IGameSimulation.Apply", "invariantsTouched": ["tenant-isolation", "protocol-typing", "authoritative-intent"] }
+  ],
+  "invariantEvidence": {
+    "tenant-isolation": { "notes": "Trusted tenant source is Session.Tenant (from ITenantResolver.TryResolve seeded by verified JoinTokenClaims). RoomKey in HandleJoinAsync built from session.Tenant.TenantId, NOT inbound envelope. Mapper.ToKernel copies wire fields verbatim (untrusted) and every handler re-validates against principal/session.", "sourceSymbols": ["Session.Tenant"], "untrustedSymbols": ["inbound.TenantId", "inbound.RoomId", "inbound.PlayerId"], "keyType": "RoomKey", "resolvedAt": ["ITenantResolver.TryResolve"] },
+    "protocol-typing": { "marker": "IMessagePayload", "dispatchEnum": "MessageType", "dispatchSites": ["RealtimeServer.ProcessAsync", "RealtimeEnvelopeMapper.MapServer", "RealtimeEnvelopeMapper.MapClient"], "allDispatchesHaveDefault": true, "notes": "Six switch sites observed; all have explicit defaults, two throw." },
+    "backpressure": { "boundedTypes": ["GameRoom._pending (1024)", "BoundedOutboundChannel (256)", "transport maxFrameBytes", "kernel _maxCommandBytes"], "admissionPolicy": "AdmissionPolicy", "rateLimiter": "ITenantRateLimiter" },
+    "observability": { "sink": "ITelemetrySink", "calls": [ {"metric": "CommandsAccepted", "tags": [], "issue": "untagged hot-path counter; accepted command not correlatable"}, {"metric": "ClientAcks", "tags": [], "issue": "untagged"}, {"metric": "BackpressureRejections", "tags": [], "issue": "single untagged counter for 3 distinct causes; no 'reason' tag"}, {"metric": "MessagesIn", "tags": ["messageType"], "issue": "global folds to messageType only; per-tenant only via optional ITenantMetricsSink"} ], "traceIdPropagated": true, "notes": "inbound.TraceId IS propagated to kernel (ToKernel) and onto rejection events/replies. TickRoom fanout uses synthesized snapshot-{room}-{tick} traceId (expected)." },
+    "authoritative-intent": { "notes": "ClientCommand carries only a command string. ClientInputFrame mapped to Ignore (accepted, never simulated). Command path uses connection.Player (bound at validated join), so a spoofed envelope PlayerId on a command is silently ignored. PlayerId validated against token only at join.", "playerIdValidatedAt": ["RealtimeServer.HandleJoinAsync"], "commandUsesBoundPlayer": true }
+  },
+  "gaps": [
+    "CommandsAccepted and ClientAcks emit with NO tags (no tenant/room/player/trace).",
+    "BackpressureRejections is one untagged counter spanning rate-limit shed, room-queue full, and outbound drop — no 'reason' tag to distinguish.",
+    "Per-tenant ingress attribution only via optional ITenantMetricsSink (null in unit harness)."
+  ]
+}

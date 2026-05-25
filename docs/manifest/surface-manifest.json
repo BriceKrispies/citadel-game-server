@@ -1,0 +1,100 @@
+{
+  "$schema": "./surface-manifest.schema.note",
+  "generatedAt": "2026-05-25",
+  "description": "Centralized code-graph manifest of every exposed surface of the Citadel game server, traced from its entry point inward to its natural authoritative stopping point. Synthesized from docs/manifest/fragments/*.json. Drives the 'invariants' config in repo-analyzers.json that the CITADEL0004-0013 analyzers enforce.",
+  "fragments": ["fragments/tracer-r.json", "fragments/tracer-c.json", "fragments/tracer-w.json", "fragments/tracer-x.json"],
+  "stoppingPointDefinition": [
+    "authoritative kernel boundary: GameRoom.Tick / IGameSimulation.Apply",
+    "persistence/replication port: ISnapshotStore, IEventLog, IRoomReplicator",
+    "registry/abstraction port: InMemory*Registry, IRoomDirectory, IRoomPlacement, IAuditLog, JoinTokenService, IGameCatalog",
+    "telemetry sink: ITelemetrySink / AggregatingTelemetrySink",
+    "process boundary: stdout write (IPC) / Redis EVAL",
+    "a node that only calls ring-0 kernel ports (Abstractions/Protocol/Replication) is terminal"
+  ],
+  "surfaces": [
+    { "id": "realtime-connect", "surface": "/realtime/v1/connect", "type": "websocket-binary", "auth": "join-token", "entry": "RealtimeServer.HandleConnectionAsync", "stopsAt": "IGameSimulation.Apply", "fragment": "R", "invariantsTouched": ["tenant-isolation", "backpressure", "protocol-typing", "observability", "authoritative-intent"] },
+    { "id": "realtime-ws-dev", "surface": "/ws", "type": "websocket-text-dev", "auth": "none (IsDevelopment AND Realtime:EnableDevEndpoints)", "entry": "RealtimeServer.HandleConnectionAsync", "stopsAt": "IGameSimulation.Apply", "fragment": "R", "invariantsTouched": ["tenant-isolation", "protocol-typing", "authoritative-intent"] },
+    { "id": "cp-create-room", "surface": "POST /api/v1/rooms", "type": "http-json", "auth": "api-key", "entry": "Program:apiV1Group.Filter", "stopsAt": "IRoomPlacement.Place", "fragment": "C", "invariantsTouched": ["tenant-isolation", "observability", "authz", "backpressure"] },
+    { "id": "cp-join-token", "surface": "POST /api/v1/rooms/{roomId}/join-token", "type": "http-json", "auth": "api-key", "entry": "Program:apiV1Group.Filter", "stopsAt": "JoinTokenService.Issue", "fragment": "C", "invariantsTouched": ["tenant-isolation", "observability", "authz"] },
+    { "id": "cp-get-room", "surface": "GET /api/v1/rooms/{roomId}", "type": "http-json", "auth": "api-key", "entry": "Program:apiV1Group.Filter", "stopsAt": "InMemoryRoomRegistry", "fragment": "C", "invariantsTouched": ["tenant-isolation", "authz"] },
+    { "id": "cp-delete-session", "surface": "DELETE /api/v1/sessions/{sessionId}", "type": "http-json", "auth": "api-key", "entry": "Program:apiV1Group.Filter", "stopsAt": "InMemorySessionRegistry", "fragment": "C", "invariantsTouched": ["tenant-isolation", "observability", "authz"] },
+    { "id": "admin-list-rooms", "surface": "GET /api/v1/admin/rooms", "type": "http-json", "auth": "api-key+platform-admin", "entry": "Program:apiV1Group.Filter", "stopsAt": "RoomScopedMetrics.Hottest", "fragment": "C", "invariantsTouched": ["tenant-isolation", "observability", "authz"] },
+    { "id": "admin-observe-room", "surface": "GET /api/v1/admin/rooms/{tenantId}/{roomId}", "type": "http-json", "auth": "api-key", "entry": "Program:apiV1Group.Filter", "stopsAt": "RealtimeServer.TryObserveRoom", "fragment": "C", "invariantsTouched": ["tenant-isolation", "authz"] },
+    { "id": "admin-observe-sse", "surface": "GET /api/v1/admin/rooms/{tenantId}/{roomId}/observe", "type": "sse", "auth": "api-key", "entry": "Program:apiV1Group.Filter", "stopsAt": "RealtimeServer.TryObserveRoom", "fragment": "C", "invariantsTouched": ["tenant-isolation", "observability", "authz"] },
+    { "id": "telemetry-sse", "surface": "GET /sim/telemetry", "type": "sse", "auth": "none (dev-only gate)", "entry": "Program:/sim/telemetry", "stopsAt": "AggregatingTelemetrySink.Snapshot", "fragment": "C", "invariantsTouched": ["observability"] },
+    { "id": "health-ready", "surface": "GET /health,/ready,/version", "type": "http", "auth": "none", "entry": "Program", "stopsAt": "IRoomDirectory.TryGetOwner", "fragment": "C", "invariantsTouched": [] },
+    { "id": "worker-room-tick", "surface": "worker:room-tick", "type": "background-loop", "auth": "internal", "entry": "RoomTickService.RunAsync", "stopsAt": "IGameSimulation.Apply", "fragment": "W", "invariantsTouched": ["room-ownership", "backpressure", "observability", "simulation-purity"] },
+    { "id": "worker-lease-renewal", "surface": "worker:room-lease-renewal", "type": "background-loop", "auth": "internal", "entry": "RoomLeaseRenewalService.RunAsync", "stopsAt": "IRoomDirectory.TryRenew", "fragment": "W", "invariantsTouched": ["tenant-isolation", "atomicity"] },
+    { "id": "worker-telemetry-flush", "surface": "worker:telemetry-flush", "type": "background-loop", "auth": "internal", "entry": "TelemetryFlushService.RunAsync", "stopsAt": "AggregatingTelemetrySink.Snapshot", "fragment": "W", "invariantsTouched": ["observability", "backpressure"] },
+    { "id": "ipc-room-worker", "surface": "ipc:room-worker", "type": "stdio-jsonrpc", "auth": "n/a (trusted parent)", "entry": "RoomHost.Run", "stopsAt": "IGameSimulation.Apply", "fragment": "X", "invariantsTouched": ["crash-containment", "tenant-isolation", "protocol-typing"] },
+    { "id": "cluster-redis-directory", "surface": "cluster:redis-directory", "type": "redis", "auth": "n/a", "entry": "RedisRoomDirectory.TryClaim", "stopsAt": "boundary:redis-eval", "fragment": "X", "invariantsTouched": ["tenant-isolation", "atomicity"] },
+    { "id": "cluster-redis-placement", "surface": "cluster:redis-placement", "type": "redis", "auth": "n/a", "entry": "RedisRoomPlacement.PlaceScript", "stopsAt": "boundary:redis-eval", "fragment": "X", "invariantsTouched": ["tenant-isolation", "atomicity", "backpressure"] }
+  ],
+  "invariantEvidence": {
+    "tenant-isolation": {
+      "firstClassType": "GameServer.Abstractions.Tenancy.TenantContext",
+      "keyType": "RoomKey (TenantId + RoomId)",
+      "resolvedAt": ["ITenantResolver.TryResolve (once at ClientHello)"],
+      "trustedSourceSymbols": ["Session.Tenant", "room.TenantId", "session.TenantId", "JoinTokenClaims"],
+      "untrustedSymbols": ["inbound.TenantId", "inbound.RoomId", "inbound.PlayerId (envelope/wire fields)", "route tenantId/roomId params"],
+      "notes": "Realtime: RoomKey built from session.Tenant.TenantId, never the envelope. Control plane: read/delete derive tenant from the stored record, not the route. Redis: every key embeds escaped tenant. GAP: IPC envelope carries no TenantId/RoomKey (parent-side discipline only)."
+    },
+    "simulation-purity": {
+      "simulationAssemblies": ["GameServer.Simulation"],
+      "clockPort": "GameServer.Simulation.ISimulationClock (in GameServer.Abstractions assembly)",
+      "randomPort": "GameServer.Simulation.IRandomSource (in GameServer.Abstractions assembly)",
+      "bannedApis": ["System.DateTime.Now", "System.DateTime.UtcNow", "System.DateTime.Today", "System.DateTimeOffset.Now", "System.DateTimeOffset.UtcNow", "System.Diagnostics.Stopwatch", "System.Random.Shared", "System.Guid.NewGuid", "System.Environment.TickCount", "System.Environment.TickCount64", "System.Threading.Thread.Sleep", "System.Threading.Tasks.Task.Delay"],
+      "newRandomBanned": "new System.Random() with no seed argument",
+      "notes": "Wall-clock & Stopwatch legitimately live in GameServer.Host (RoomTickService PeriodicTimer, TelemetryFlushService Stopwatch) — composition root, allowed. The kernel advances on ISimulationClock (tick count). The purity boundary CITADEL0004 protects is: nothing in the GameServer.Simulation assembly may read wall-clock or ambient randomness."
+    },
+    "protocol-typing": {
+      "marker": "GameServer.Protocol.IMessagePayload",
+      "dispatchEnum": "GameServer.Protocol.MessageType",
+      "enumMembers": ["ClientHello", "ClientJoinRoom", "ClientCommand", "ClientAck", "ClientLeaveRoom", "ServerWelcome", "ServerSnapshot", "ServerDelta", "ServerCorrection", "ServerEvent", "ServerError"],
+      "dispatchSites": ["GameServer.Transport.RealtimeServer.ProcessAsync", "GameServer.Transport.RealtimeEnvelopeMapper.MapServer", "GameServer.Transport.RealtimeEnvelopeMapper.MapClient"],
+      "payloadImplementorsAllSealedRecords": true,
+      "notes": "All IMessagePayload implementors are sealed records (CITADEL0005 baseline already clean). All MessageType switches observed carry an explicit default; two throw."
+    },
+    "backpressure": {
+      "boundedTypes": ["GameRoom._pending (maxQueueDepth, default 1024)", "BoundedOutboundChannel (capacity, default 256)", "transport maxFrameBytes (default 64KB)", "kernel _maxCommandBytes", "TickHealthWindow"],
+      "admissionPolicy": "GameServer.Transport.AdmissionPolicy (MaxConnections, MaxConnectionsPerTenant, MaxRooms, MaxRoomsPerTenant)",
+      "rateLimiter": "ITenantRateLimiter.TryAcquire",
+      "degradation": "IDegradationController.Observe(missedTickRate, tickP95Ms)",
+      "boundedCollectionAllowlistSeed": "Collections that are legitimately unbounded-by-design and must NOT be flagged by CITADEL0006 (config allowlist)."
+    },
+    "observability": {
+      "sink": "GameServer.Observability.ITelemetrySink",
+      "sinkMethods": ["Increment(metric, tags)", "Measure(metric, value, tags)", "Event(name, fields)"],
+      "auditLog": "GameServer.Abstractions.ControlPlane.IAuditLog",
+      "canonicalNames": "GameServer.Abstractions.Observability.TelemetryMetrics",
+      "requiredTagsByMetric": {
+        "ConnectionsOpened": ["tenantId", "connectionId"],
+        "SessionCreated": ["tenantId", "sessionId"],
+        "SnapshotEmitted": ["tenantId", "roomId", "tick"],
+        "CommandRejected": ["tenantId", "traceId", "code"]
+      },
+      "traceIdSource": "inbound.TraceId",
+      "notes": "Tags carry tenant/room/session/player/trace correlation. requiredTagsByMetric is the seed schema for CITADEL0010; expand as gaps below are closed."
+    },
+    "room-ownership": {
+      "mutationOwner": "GameServer.Simulation.GameRoom.Tick",
+      "applyTarget": "IGameSimulation.Apply",
+      "rule": "_game.Apply / IGameSimulation.Apply may be invoked ONLY from GameRoom.Tick. Commands are validated then queued by TryEnqueue (no state touch); application is deferred to Tick.",
+      "notes": "CITADEL0009 enforces the single-caller invariant."
+    },
+    "authoritative-intent": {
+      "intentType": "ClientCommand (game-defined string, not a position/truth claim)",
+      "ignored": "ClientInputFrame -> Ignore (accepted, never simulated)",
+      "playerBinding": "command path uses connection.Player bound at validated join, not inbound.PlayerId",
+      "validatedAt": "RealtimeServer.HandleJoinAsync (PlayerId vs token)",
+      "notes": "CITADEL0012 enforces that an inbound PlayerId is compared to the authenticated session before parameterizing a mutation."
+    }
+  },
+  "crossCuttingGaps": [
+    { "id": "obs-untagged-hotpath", "severity": "medium", "from": ["R", "W"], "detail": "CommandsAccepted, ClientAcks, BackpressureRejections, TickDurationMs, MissedTicks emitted with no correlation tags. BackpressureRejections folds 3 distinct causes into one untagged counter (needs 'reason' tag)." },
+    { "id": "tenant-stringly-label", "severity": "low", "from": ["C", "W"], "detail": "RoomScopedMetrics keys rooms by a stringly-typed \"{tenant}/{room}\" label (TenantOf splits on '/'); fails closed but is fragile vs a typed RoomKey." },
+    { "id": "ipc-no-tenant-tag", "severity": "medium", "from": ["X"], "detail": "RoomRpcRequest/Response carry no TenantId/RoomKey; RemoteGameRoom keyed by RoomId alone. Cross-tenant isolation across IPC rests entirely on parent-side wiring with no in-band tag to catch a mis-wire." },
+    { "id": "admin-audit-wildcard", "severity": "low", "from": ["C"], "detail": "GET /api/v1/admin/rooms audits target=\"*\" regardless of the tenant filter actually applied." },
+    { "id": "cluster-no-telemetry", "severity": "low", "from": ["X"], "detail": "Redis directory/placement and child-side RPC emit no claim/lease/per-RPC telemetry." }
+  ]
+}

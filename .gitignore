@@ -8,3 +8,4 @@ StrykerOutput/
 stryker-*.log
 host.log
 load/results/
+.claude/

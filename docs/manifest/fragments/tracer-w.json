@@ -1,0 +1,53 @@
+{
+  "tracer": "W-workers",
+  "provenance": "Original team agent W result was lost to an internal error; synthesizer re-traced directly from source (RoomTickService.cs, RoomLeaseRenewalService.cs, TelemetryFlushService.cs, SupervisorHostedService.cs, RoomTickScheduler.cs).",
+  "nodes": [
+    { "id": "SupervisorHostedService.ExecuteAsync", "file": "src/GameServer.Host/SupervisorHostedService.cs", "assembly": "GameServer.Host", "ring": "composition-root", "kind": "entry", "summary": "BackgroundService hosting WorkerSupervisor; ties supervisor drain (3s) to host stopping." },
+    { "id": "WorkerSupervisor.RunAsync", "file": "src/GameServer.Transport", "assembly": "GameServer.Transport", "ring": 3, "kind": "scheduler", "summary": "Framework-free; runs each ISupervisedWorker with independent restart+backoff; counts WorkerRestartCount; bounded graceful drain." },
+    { "id": "RoomTickService.RunAsync", "file": "src/GameServer.Host/RoomTickService.cs", "assembly": "GameServer.Host", "ring": "composition-root", "kind": "worker", "summary": "PeriodicTimer at 1/TickHz (default 10Hz). Wall-clock cadence lives HERE in the host." },
+    { "id": "IRoomTickScheduler.TickCycleAsync", "file": "src/GameServer.Abstractions", "assembly": "GameServer.Abstractions", "ring": 0, "kind": "port", "summary": "Scheduling strategy seam (serial vs concurrent)." },
+    { "id": "ParallelRoomTickScheduler.TickCycleAsync", "file": "src/GameServer.Transport/RoomTickScheduler.cs", "assembly": "GameServer.Transport", "ring": 3, "kind": "scheduler", "summary": "Ticks all rooms concurrently; one slow room cannot block others; returns per-room samples." },
+    { "id": "RealtimeServer.TickRoom", "file": "src/GameServer.Transport/RealtimeServer.cs", "assembly": "GameServer.Transport", "ring": 3, "kind": "handler", "summary": "Per-room: tick -> persist snapshot/events -> replicate to connected players." },
+    { "id": "GameRoom.Tick", "file": "src/GameServer.Simulation/GameRoom.cs", "assembly": "GameServer.Simulation", "ring": 1, "kind": "owner", "summary": "Sole caller of _game.Apply; advances authoritative state using ISimulationClock." },
+    { "id": "IGameSimulation.Apply", "file": "src/GameServer.Abstractions/Simulation", "assembly": "GameServer.Abstractions", "ring": 0, "kind": "terminal", "summary": "Authoritative kernel boundary. STOP." },
+    { "id": "IDegradationController.Observe", "file": "src/GameServer.Abstractions", "assembly": "GameServer.Abstractions", "ring": 0, "kind": "port", "summary": "Fed windowed missed-tick rate / tick p95; edge reads level to shed optional load." },
+    { "id": "RoomScopedMetrics.Record", "file": "src/GameServer.Observability", "assembly": "GameServer.Observability", "ring": 1, "kind": "sink", "summary": "Per-room tick cost keyed by stringly-typed \"{tenant}/{room}\" label." },
+    { "id": "RoomLeaseRenewalService.RunAsync", "file": "src/GameServer.Host/RoomLeaseRenewalService.cs", "assembly": "GameServer.Host", "ring": "composition-root", "kind": "worker", "summary": "PeriodicTimer; RENEWs (not claims) leases for ActiveRooms; never resurrects lost ownership (anti-split-brain)." },
+    { "id": "IRoomDirectory.TryRenew", "file": "src/GameServer.Abstractions", "assembly": "GameServer.Abstractions", "ring": 0, "kind": "port", "summary": "Refreshes lease only while still owner. STOP." },
+    { "id": "TelemetryFlushService.RunAsync", "file": "src/GameServer.Host/TelemetryFlushService.cs", "assembly": "GameServer.Host", "ring": "composition-root", "kind": "worker", "summary": "Every 5s reads AggregatingTelemetrySink.Snapshot; hot path only accumulates, this loop is sole reader (telemetry never amplifies load)." },
+    { "id": "AggregatingTelemetrySink.Snapshot", "file": "src/GameServer.Observability", "assembly": "GameServer.Observability", "ring": 1, "kind": "sink", "summary": "Rolling counters/measures snapshot. STOP." },
+    { "id": "ITelemetrySink", "file": "src/GameServer.Abstractions/Observability", "assembly": "GameServer.Abstractions", "ring": 0, "kind": "sink", "summary": "TickDurationMs / MissedTicks emitted here." }
+  ],
+  "edges": [
+    { "from": "SupervisorHostedService.ExecuteAsync", "to": "WorkerSupervisor.RunAsync", "kind": "calls" },
+    { "from": "WorkerSupervisor.RunAsync", "to": "RoomTickService.RunAsync", "kind": "calls" },
+    { "from": "WorkerSupervisor.RunAsync", "to": "RoomLeaseRenewalService.RunAsync", "kind": "calls" },
+    { "from": "WorkerSupervisor.RunAsync", "to": "TelemetryFlushService.RunAsync", "kind": "calls" },
+    { "from": "RoomTickService.RunAsync", "to": "IRoomTickScheduler.TickCycleAsync", "kind": "ticks" },
+    { "from": "IRoomTickScheduler.TickCycleAsync", "to": "ParallelRoomTickScheduler.TickCycleAsync", "kind": "calls" },
+    { "from": "ParallelRoomTickScheduler.TickCycleAsync", "to": "RealtimeServer.TickRoom", "kind": "ticks" },
+    { "from": "RealtimeServer.TickRoom", "to": "GameRoom.Tick", "kind": "ticks" },
+    { "from": "GameRoom.Tick", "to": "IGameSimulation.Apply", "kind": "calls" },
+    { "from": "RoomTickService.RunAsync", "to": "IDegradationController.Observe", "kind": "calls" },
+    { "from": "RoomTickService.RunAsync", "to": "ITelemetrySink", "kind": "emits" },
+    { "from": "RoomTickService.RunAsync", "to": "RoomScopedMetrics.Record", "kind": "emits" },
+    { "from": "RoomLeaseRenewalService.RunAsync", "to": "IRoomDirectory.TryRenew", "kind": "calls" },
+    { "from": "TelemetryFlushService.RunAsync", "to": "AggregatingTelemetrySink.Snapshot", "kind": "emits" }
+  ],
+  "surfaces": [
+    { "surface": "worker:room-tick", "type": "background-loop", "entry": "RoomTickService.RunAsync", "trace": ["SupervisorHostedService.ExecuteAsync", "WorkerSupervisor.RunAsync", "RoomTickService.RunAsync", "IRoomTickScheduler.TickCycleAsync", "ParallelRoomTickScheduler.TickCycleAsync", "RealtimeServer.TickRoom", "GameRoom.Tick", "IGameSimulation.Apply"], "stopsAt": "IGameSimulation.Apply", "invariantsTouched": ["room-ownership", "backpressure", "observability", "simulation-purity"] },
+    { "surface": "worker:room-lease-renewal", "type": "background-loop", "entry": "RoomLeaseRenewalService.RunAsync", "trace": ["WorkerSupervisor.RunAsync", "RoomLeaseRenewalService.RunAsync", "IRoomDirectory.TryRenew"], "stopsAt": "IRoomDirectory.TryRenew", "invariantsTouched": ["tenant-isolation", "atomicity"] },
+    { "surface": "worker:telemetry-flush", "type": "background-loop", "entry": "TelemetryFlushService.RunAsync", "trace": ["WorkerSupervisor.RunAsync", "TelemetryFlushService.RunAsync", "AggregatingTelemetrySink.Snapshot"], "stopsAt": "AggregatingTelemetrySink.Snapshot", "invariantsTouched": ["observability", "backpressure"] }
+  ],
+  "invariantEvidence": {
+    "room-ownership": { "applySite": "GameRoom.Tick -> IGameSimulation.Apply", "applyOnlyCaller": "GameRoom.Tick", "notes": "Workers reach state only through RealtimeServer.TickRoom -> GameRoom.Tick. No worker mutates room state directly; mutation is queued-then-applied-on-tick." },
+    "simulation-purity": { "simClock": "ISimulationClock", "schedulerClock": "PeriodicTimer + Stopwatch (host)", "wallClockInScheduler": ["RoomTickService (PeriodicTimer)", "TelemetryFlushService (System.Diagnostics.Stopwatch, Process.GetCurrentProcess())"], "notes": "Wall-clock and Stopwatch live in GameServer.Host (composition root), NEVER in the GameServer.Simulation kernel — this is the exact purity boundary CITADEL0004 must protect. Simulation advances on ISimulationClock fed by tick count, not DateTime." },
+    "backpressure": { "boundedTypes": ["GameRoom._pending", "TickHealthWindow (trailing window)"], "parallelismLimit": "ParallelRoomTickScheduler (per-room concurrency, slow room isolated)", "missedTickHandling": "report.TotalElapsedMs > interval -> MissedTicks increment; degradation ladder escalates", "degradation": "IDegradationController.Observe(missedTickRate, tickP95Ms)" },
+    "observability": { "sink": "ITelemetrySink", "calls": [ {"metric": "TickDurationMs", "tags": [], "site": "RoomTickService.RunAsync"}, {"metric": "MissedTicks", "tags": [], "site": "RoomTickService.RunAsync"} ], "roomScoped": "RoomScopedMetrics.Record keyed by \"{tenant}/{room}\" (bounded cardinality, answers 'which room is hot')" },
+    "supervision": { "supervisor": "WorkerSupervisor", "seam": "ISupervisedWorker", "restartBackoffDrain": "independent restart + backoff per worker; WorkerRestartCount; bounded 3s graceful drain inside host ShutdownTimeout; wedged worker reported and abandoned, not held open" }
+  },
+  "gaps": [
+    "TickDurationMs / MissedTicks are emitted untagged (global, no per-tenant/per-room dimension on the sink itself; per-room cost only via RoomScopedMetrics string label).",
+    "RoomScopedMetrics.Record uses a stringly-typed \"{tenant}/{room}\" label rather than a typed RoomKey — same fragile seam Tracer C flagged for the admin read path."
+  ]
+}

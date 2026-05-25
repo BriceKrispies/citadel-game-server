@@ -1,0 +1,43 @@
+{
+  "tracer": "X-crossproc-cluster",
+  "provenance": "Traced by team agent X; reconciled against source by synthesizer.",
+  "nodes": [
+    { "id": "OutOfProcessWorker", "file": "src/GameServer.Transport/Transport.cs", "assembly": "GameServer.Transport", "ring": 3, "kind": "orchestrator", "summary": "ISupervisedWorker that launches child via SystemProcessLauncher; owns the proxy/channel pairing; holds tenant context." },
+    { "id": "RemoteGameRoom", "file": "src/GameServer.Transport/RoomIpc.cs", "assembly": "GameServer.Transport", "ring": 3, "kind": "ipc", "summary": "IGameRoom proxy keyed by RoomId alone; encodes calls as typed RoomRpcRequest via RoomRpcCodec." },
+    { "id": "StreamRoomRpcChannel.Exchange", "file": "src/GameServer.Transport/RoomIpc.cs", "assembly": "GameServer.Transport", "ring": 3, "kind": "boundary", "summary": "Writes one JSON line to child stdin + flush, reads exactly one line back (locked, no pipelining). PARENT-SIDE PROCESS BOUNDARY. STOP." },
+    { "id": "RoomHost.Run", "file": "src/GameServer.RoomWorkerHost/Program.cs", "assembly": "GameServer.RoomWorkerHost", "ring": "composition-root", "kind": "entry", "summary": "Child loop: read line -> Handle -> Dispatch RoomRpcOp to real GameRoom." },
+    { "id": "RoomHost.Dispatch", "file": "src/GameServer.RoomWorkerHost", "assembly": "GameServer.RoomWorkerHost", "ring": "composition-root", "kind": "handler", "summary": "Maps RoomRpcOp -> GameRoom calls; host exceptions returned as typed RoomRpcResponse(Error), not a torn stream." },
+    { "id": "GameRoom.Tick", "file": "src/GameServer.Simulation/GameRoom.cs", "assembly": "GameServer.Simulation", "ring": 1, "kind": "owner", "summary": "Child-side kernel; sole caller of _game.Apply." },
+    { "id": "IGameSimulation.Apply", "file": "src/GameServer.Abstractions/Simulation", "assembly": "GameServer.Abstractions", "ring": 0, "kind": "terminal", "summary": "Authoritative kernel boundary. STOP." },
+    { "id": "RedisRoomDirectory.TryClaim", "file": "src/GameServer.Cluster.Redis/RedisRoomDirectory.cs", "assembly": "GameServer.Cluster.Redis", "ring": "infra", "kind": "ipc", "summary": "ScriptEvaluate(ClaimScript, KEYS=[OwnerKey,NodeRooms], ARGV=[owner,LeaseMs,Member])." },
+    { "id": "RedisRoomDirectory.ClaimScript", "file": "src/GameServer.Cluster.Redis/RedisRoomDirectory.cs", "assembly": "GameServer.Cluster.Redis", "ring": "infra", "kind": "boundary", "summary": "Lua: server TIME -> trim expired -> GET owner -> claim only if unowned||ours (SET PX + ZADD). Atomic mutual exclusion. REDIS EVAL BOUNDARY. STOP." },
+    { "id": "RedisRoomPlacement.PlaceScript", "file": "src/GameServer.Cluster.Redis/RedisRoomPlacement.cs", "assembly": "GameServer.Cluster.Redis", "ring": "infra", "kind": "boundary", "summary": "Fleet-atomic capacity check + stale-owner reclaim. STOP." }
+  ],
+  "edges": [
+    { "from": "OutOfProcessWorker", "to": "RemoteGameRoom", "kind": "spawns" },
+    { "from": "RemoteGameRoom", "to": "StreamRoomRpcChannel.Exchange", "kind": "calls" },
+    { "from": "StreamRoomRpcChannel.Exchange", "to": "RoomHost.Run", "kind": "writes-stdin" },
+    { "from": "RoomHost.Run", "to": "RoomHost.Dispatch", "kind": "calls" },
+    { "from": "RoomHost.Dispatch", "to": "GameRoom.Tick", "kind": "calls" },
+    { "from": "GameRoom.Tick", "to": "IGameSimulation.Apply", "kind": "calls" },
+    { "from": "RoomHost.Run", "to": "StreamRoomRpcChannel.Exchange", "kind": "reads-stdout" },
+    { "from": "RedisRoomDirectory.TryClaim", "to": "RedisRoomDirectory.ClaimScript", "kind": "claims" }
+  ],
+  "surfaces": [
+    { "surface": "ipc:room-worker", "type": "stdio-jsonrpc", "auth": "n/a (child of trusted parent)", "entry": "RoomHost.Run", "trace": ["OutOfProcessWorker", "RemoteGameRoom", "StreamRoomRpcChannel.Exchange", "RoomHost.Run", "RoomHost.Dispatch", "GameRoom.Tick", "IGameSimulation.Apply"], "stopsAt": "IGameSimulation.Apply", "invariantsTouched": ["crash-containment", "tenant-isolation", "protocol-typing"] },
+    { "surface": "cluster:redis-directory", "type": "redis", "auth": "n/a", "entry": "RedisRoomDirectory.TryClaim", "trace": ["RedisRoomDirectory.TryClaim", "RedisRoomDirectory.ClaimScript"], "stopsAt": "boundary:redis-eval", "invariantsTouched": ["tenant-isolation", "atomicity"] },
+    { "surface": "cluster:redis-placement", "type": "redis", "auth": "n/a", "entry": "RedisRoomPlacement.PlaceScript", "trace": ["RedisRoomPlacement.PlaceScript"], "stopsAt": "boundary:redis-eval", "invariantsTouched": ["tenant-isolation", "atomicity", "backpressure"] }
+  ],
+  "invariantEvidence": {
+    "crash-containment": { "seam": "ISupervisedWorker", "childDeathHandling": "non-zero child exit -> worker_process_crashed + throw -> WorkerSupervisor restart (worker_restart_count); cancellation -> close-stdin grace -> Kill(entireProcessTree) so no orphan; host exception inside child -> typed RoomRpcResponse(Error), not a torn stream." },
+    "tenant-isolation": { "redisKeyIncludesTenant": true, "redisKeyPattern": "Member(RoomKey) = EscapeDataString(TenantId)/EscapeDataString(RoomId)", "redisInjectivityGuard": "explicit comment guards a/b+c vs a+b/c collision via escaping", "ipcCarriesRoomKey": false, "notes": "REDIS SIDE CORRECT — every key embeds escaped tenant, no cross-tenant collision. IPC SIDE GAP — child launched with only 'roomId gameId'; RoomRpcRequest/Response carry Player/Command/Sequence/snapshots but NO TenantId or RoomKey; RemoteGameRoom keyed by RoomId alone. Tenant isolation across IPC is enforced ENTIRELY on the parent (which holds tenant context and owns proxy/channel pairing). Sound only while the parent never multiplexes two tenants' rooms over one channel and never reuses a child across tenants. No in-band tenant tag means a routing mis-wire could not be detected at the boundary." },
+    "atomicity": { "claimScript": "GET owner -> claim only if unowned||ours, SET PX + ZADD in one EVAL", "leaseTtl": "RedisClusterOptions.LeaseMs default 30s", "mutualExclusion": "single round-trip atomic claim prevents split-brain; OwnedCount = ZCARD of un-expired members (no reaper)" },
+    "protocol-typing": { "ipcContracts": ["RoomRpcRequest", "RoomRpcResponse", "RoomRpcOp (enum)"], "untypedFound": [], "stringlyTypedSeam": "Admission round-tripped via Enum.Parse<CommandAdmission>" },
+    "observability": { "sink": "ITelemetrySink", "calls": [ {"metric": "worker_process_crashed"}, {"metric": "worker_restart_count"} ], "gap": "Child RoomHost/StreamRoomRpcChannel emit no per-RPC metrics; RedisRoomDirectory/RedisRoomPlacement emit no claim/lease/ClusterAtCapacity metrics." }
+  },
+  "gaps": [
+    "HIGHEST-VALUE FINDING: IPC envelope (RoomRpcRequest/Response) carries no TenantId/RoomKey — RemoteGameRoom is keyed by RoomId alone. Cross-tenant isolation on the IPC boundary rests entirely on parent-side wiring discipline with no in-band tag to catch a mis-wire. Recommend a defensive RoomKey/TenantId field on the envelope.",
+    "Redis directory/placement and child-side RPC have no telemetry (claim/lease/per-RPC).",
+    "Admission enum round-tripped via Enum.Parse (stringly-typed seam)."
+  ]
+}

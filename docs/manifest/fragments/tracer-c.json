@@ -1,0 +1,62 @@
+{
+  "tracer": "C-control-admin",
+  "provenance": "Traced by team agent C; reconciled against source by synthesizer.",
+  "nodes": [
+    { "id": "Program:apiV1Group.Filter", "file": "src/GameServer.Host/Program.cs", "assembly": "GameServer.Host", "ring": "composition-root", "kind": "filter", "summary": "Group filter on /api/v1: Bearer key -> ApiKeyControlPlaneAuthenticator.TryAuthenticate -> CallerPrincipal." },
+    { "id": "ApiKeyControlPlaneAuthenticator.TryAuthenticate", "file": "src/GameServer.ControlPlane", "assembly": "GameServer.ControlPlane", "ring": 1, "kind": "port", "summary": "Maps API key -> CallerPrincipal (tenant + roles incl. PlatformAdminRole)." },
+    { "id": "CallerPrincipal.CanActFor", "file": "src/GameServer.ControlPlane", "assembly": "GameServer.ControlPlane", "ring": 1, "kind": "handler", "summary": "platform-admin OR ordinal tenant match. Backs Forbid()." },
+    { "id": "Program:Forbid", "file": "src/GameServer.Host/Program.cs", "assembly": "GameServer.Host", "ring": "composition-root", "kind": "handler", "summary": "403 + audit(outcome=denied) when caller cannot act for target tenant." },
+    { "id": "Program:Audit", "file": "src/GameServer.Host/Program.cs", "assembly": "GameServer.Host", "ring": "composition-root", "kind": "handler", "summary": "Records every allowed mutation/observe to IAuditLog (AuditRecord: actor/action/target/when/outcome)." },
+    { "id": "InMemoryGameCatalog", "file": "src/GameServer.ControlPlane", "assembly": "GameServer.ControlPlane", "ring": 1, "kind": "port", "summary": "Game catalog. STOP." },
+    { "id": "InMemoryRoomRegistry", "file": "src/GameServer.ControlPlane", "assembly": "GameServer.ControlPlane", "ring": 1, "kind": "port", "summary": "Room registry; read-room derives tenant from stored room.TenantId (not route). STOP." },
+    { "id": "InMemorySessionRegistry", "file": "src/GameServer.ControlPlane", "assembly": "GameServer.ControlPlane", "ring": 1, "kind": "port", "summary": "Session registry; delete-session derives tenant from stored session.TenantId. STOP." },
+    { "id": "JoinTokenService.Issue", "file": "src/GameServer.Identity", "assembly": "GameServer.Identity", "ring": 1, "kind": "port", "summary": "Mints signed join token. STOP." },
+    { "id": "IRoomPlacement.Place", "file": "src/GameServer.Routing", "assembly": "GameServer.Routing", "ring": 2, "kind": "port", "summary": "Sheds to 503 ClusterAtCapacity when fleet full. STOP." },
+    { "id": "IRoomDirectory.TryGetOwner", "file": "src/GameServer.Abstractions", "assembly": "GameServer.Abstractions", "ring": 0, "kind": "port", "summary": "Readiness/owner lookup. STOP." },
+    { "id": "RealtimeServer.TryObserveRoom", "file": "src/GameServer.Transport/RealtimeServer.cs", "assembly": "GameServer.Transport", "ring": 3, "kind": "terminal", "summary": "Admin read-only kernel snapshot boundary. STOP." },
+    { "id": "RealtimeServer.ActiveRooms", "file": "src/GameServer.Transport/RealtimeServer.cs", "assembly": "GameServer.Transport", "ring": 3, "kind": "terminal", "summary": "Each ActiveRoom filtered through CanActFor before exposure." },
+    { "id": "RoomScopedMetrics.Hottest", "file": "src/GameServer.Observability", "assembly": "GameServer.Observability", "ring": 1, "kind": "port", "summary": "Hot-room stats; tenant extracted via stringly-typed TenantOf(label split on '/')." },
+    { "id": "AggregatingTelemetrySink.Snapshot", "file": "src/GameServer.Observability", "assembly": "GameServer.Observability", "ring": 1, "kind": "sink", "summary": "Telemetry snapshot for /sim/telemetry SSE. STOP." }
+  ],
+  "edges": [
+    { "from": "Program:apiV1Group.Filter", "to": "ApiKeyControlPlaneAuthenticator.TryAuthenticate", "kind": "authorizes" },
+    { "from": "Program:Forbid", "to": "CallerPrincipal.CanActFor", "kind": "authorizes" },
+    { "from": "Program:Forbid", "to": "Program:Audit", "kind": "audits" },
+    { "from": "Program:Audit", "to": "InMemoryRoomRegistry", "kind": "calls" },
+    { "from": "Program:apiV1Group.Filter", "to": "InMemoryGameCatalog", "kind": "calls" },
+    { "from": "Program:apiV1Group.Filter", "to": "InMemoryRoomRegistry", "kind": "calls" },
+    { "from": "Program:apiV1Group.Filter", "to": "InMemorySessionRegistry", "kind": "calls" },
+    { "from": "Program:apiV1Group.Filter", "to": "JoinTokenService.Issue", "kind": "calls" },
+    { "from": "InMemoryRoomRegistry", "to": "IRoomPlacement.Place", "kind": "calls" },
+    { "from": "Program:apiV1Group.Filter", "to": "RealtimeServer.TryObserveRoom", "kind": "calls" },
+    { "from": "Program:apiV1Group.Filter", "to": "RealtimeServer.ActiveRooms", "kind": "calls" },
+    { "from": "RealtimeServer.ActiveRooms", "to": "RoomScopedMetrics.Hottest", "kind": "calls" },
+    { "from": "Program:/ready", "to": "IRoomDirectory.TryGetOwner", "kind": "calls" },
+    { "from": "Program:/sim/telemetry", "to": "AggregatingTelemetrySink.Snapshot", "kind": "emits" }
+  ],
+  "surfaces": [
+    { "surface": "POST /api/v1/rooms", "type": "http-json", "auth": "api-key", "entry": "Program:apiV1Group.Filter", "trace": ["Program:apiV1Group.Filter", "ApiKeyControlPlaneAuthenticator.TryAuthenticate", "Program:Forbid", "Program:Audit", "InMemoryRoomRegistry", "IRoomPlacement.Place"], "stopsAt": "IRoomPlacement.Place", "invariantsTouched": ["tenant-isolation", "observability", "authz", "backpressure"] },
+    { "surface": "POST /api/v1/rooms/{roomId}/join-token", "type": "http-json", "auth": "api-key", "entry": "Program:apiV1Group.Filter", "trace": ["Program:apiV1Group.Filter", "Program:Forbid", "JoinTokenService.Issue", "Program:Audit"], "stopsAt": "JoinTokenService.Issue", "invariantsTouched": ["tenant-isolation", "observability", "authz"] },
+    { "surface": "GET /api/v1/rooms/{roomId}", "type": "http-json", "auth": "api-key", "entry": "Program:apiV1Group.Filter", "trace": ["Program:apiV1Group.Filter", "InMemoryRoomRegistry", "Program:Forbid"], "stopsAt": "InMemoryRoomRegistry", "invariantsTouched": ["tenant-isolation", "authz"] },
+    { "surface": "DELETE /api/v1/sessions/{sessionId}", "type": "http-json", "auth": "api-key", "entry": "Program:apiV1Group.Filter", "trace": ["Program:apiV1Group.Filter", "InMemorySessionRegistry", "Program:Forbid", "Program:Audit"], "stopsAt": "InMemorySessionRegistry", "invariantsTouched": ["tenant-isolation", "observability", "authz"] },
+    { "surface": "GET /api/v1/admin/rooms", "type": "http-json", "auth": "api-key+platform-admin", "entry": "Program:apiV1Group.Filter", "trace": ["Program:apiV1Group.Filter", "RealtimeServer.ActiveRooms", "RoomScopedMetrics.Hottest", "Program:Audit"], "stopsAt": "RoomScopedMetrics.Hottest", "invariantsTouched": ["tenant-isolation", "observability", "authz"] },
+    { "surface": "GET /api/v1/admin/rooms/{tenantId}/{roomId}", "type": "http-json", "auth": "api-key", "entry": "Program:apiV1Group.Filter", "trace": ["Program:apiV1Group.Filter", "Program:Forbid", "RealtimeServer.TryObserveRoom"], "stopsAt": "RealtimeServer.TryObserveRoom", "invariantsTouched": ["tenant-isolation", "authz"] },
+    { "surface": "GET /api/v1/admin/rooms/{tenantId}/{roomId}/observe", "type": "sse", "auth": "api-key", "entry": "Program:apiV1Group.Filter", "trace": ["Program:apiV1Group.Filter", "Program:Forbid", "Program:Audit", "RealtimeServer.TryObserveRoom"], "stopsAt": "RealtimeServer.TryObserveRoom", "invariantsTouched": ["tenant-isolation", "observability", "authz"] },
+    { "surface": "GET /sim/telemetry", "type": "sse", "auth": "none (dev-only gate)", "entry": "Program:/sim/telemetry", "trace": ["Program:/sim/telemetry", "AggregatingTelemetrySink.Snapshot"], "stopsAt": "AggregatingTelemetrySink.Snapshot", "invariantsTouched": ["observability"] },
+    { "surface": "GET /ready", "type": "http", "auth": "none", "entry": "Program:/ready", "trace": ["Program:/ready", "IRoomDirectory.TryGetOwner"], "stopsAt": "IRoomDirectory.TryGetOwner", "invariantsTouched": [] },
+    { "surface": "GET /health,/version", "type": "http", "auth": "none", "entry": "Program", "trace": ["Program"], "stopsAt": "Program", "invariantsTouched": [] }
+  ],
+  "invariantEvidence": {
+    "tenant-isolation": { "notes": "Strong pattern: read-room and delete-session derive tenant from the STORED record (room.TenantId/session.TenantId), not the route, so a guessed id cannot reach another tenant's resource. The two admin route-param endpoints DO check route tenantId via Forbid(). Admin list filters every ActiveRoom and Hottest stat through CanActFor before exposing it.", "forbidLogic": "Program:Forbid -> CallerPrincipal.CanActFor", "tenantScopedPorts": ["InMemoryRoomRegistry", "InMemorySessionRegistry"], "routeTenantCheckedAt": ["GET/observe admin endpoints"] },
+    "observability": { "sink": "ITelemetrySink", "auditLog": "IAuditLog", "calls": [ {"name": "Audit(allowed)", "tags": ["actor", "action", "target", "when", "outcome"]} ], "notes": "Every control/admin mutation and observe-attach is audited; Forbid records outcome=denied." },
+    "authz": { "authenticator": "ApiKeyControlPlaneAuthenticator", "principal": "CallerPrincipal", "roles": ["PlatformAdminRole"], "denialSites": ["Program:Forbid"] },
+    "protocol-typing": { "dtos": ["ApiContracts (control plane)"], "stringlyTypedFound": ["Program:Audit target=\"*\" for admin list", "RoomScopedMetrics.TenantOf splits label on '/'", "admin list/hottest responses use anonymous objects, not named DTOs"] },
+    "backpressure": { "admissionChecks": ["IRoomPlacement.Place -> 503 ClusterAtCapacity"] }
+  },
+  "gaps": [
+    "GET /api/v1/admin/rooms audits target=\"*\" regardless of which tenants the caller could see — audit doesn't capture the actual filter applied.",
+    "RoomScopedMetrics.TenantOf is a stringly-typed split on '/' of the room label; fails closed but is a fragile seam vs a typed RoomKey.",
+    "Admin list/hottest responses use anonymous objects, inconsistent with the typed ApiContracts used elsewhere.",
+    "/sim/telemetry has no auth — gated only by IsDevelopment AND Realtime:EnableDevEndpoints (outside /api/v1 group, so the auth filter never runs). By design."
+  ]
+}
