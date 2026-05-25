@@ -10,11 +10,10 @@ namespace GameServer.SecurityTests;
 /// grants access (no snapshot for the lied-about scope).
 /// </summary>
 /// <remarks>
-/// The security-decisive assertion is "rejected AND no access granted". The exact wire error code is
-/// secondary: the kernel rejects with <c>ServerErrorCode.Unauthorized</c>, but the wire mapper has
-/// no case for it and falls through to <c>INTERNAL_SERVER_ERROR</c> (see FINDINGS.md, "Wire error
-/// code fidelity"). That is an information-fidelity defect, not an authorization defect — access is
-/// still correctly denied — so these tests assert the denial, and the finding tracks the mis-map.
+/// The security-decisive assertion is "rejected AND no access granted". The wire error code is now
+/// also asserted as <c>UNAUTHORIZED</c>: the kernel rejects with <c>ServerErrorCode.Unauthorized</c>
+/// and the wire mapper maps it honestly (Finding 5 fixed the prior fall-through to
+/// <c>INTERNAL_SERVER_ERROR</c>).
 /// </remarks>
 public sealed class RealtimeScopeEscalationTests
 {
@@ -26,6 +25,13 @@ public sealed class RealtimeScopeEscalationTests
     {
         Assert.False(outcome.AccessWasGranted, "Server granted access to a scope the token did not authorize.");
         Assert.True(outcome.WasRejected, "Server neither rejected the mismatch nor closed cleanly.");
+        // The honest wire code for an authorization rejection is UNAUTHORIZED (Finding 5). A clean
+        // close with no ServerError frame (ErrorCode null) also denies access and is acceptable; only
+        // a wrong, non-null code (e.g. the old INTERNAL_SERVER_ERROR fall-through) is a regression.
+        if (outcome.ErrorCode is { } code)
+        {
+            Assert.Equal(ErrorCode.Unauthorized, code);
+        }
     }
 
     [SkippableFact]

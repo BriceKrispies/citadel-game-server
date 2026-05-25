@@ -107,19 +107,19 @@ ceilings (100k connections, etc.) are not driven to their limit on a single test
   skipped). Revisit once the budget is wired into `RoomTickService`.
 - **Status:** Accepted gap.
 
-## Finding 5 - Wire error-code fidelity: authz rejections surface as INTERNAL_SERVER_ERROR
+## Finding 5 - Wire error-code fidelity: authz rejections surfaced as INTERNAL_SERVER_ERROR
 - **Severity:** Low (information fidelity / observability; NOT an authorization bypass).
-- **Detail:** When the realtime kernel rejects a scope-escalation or cross-tenant handshake it emits
-  `ServerErrorCode.Unauthorized`, but `RealtimeEnvelopeMapper.MapErrorCode` has no case for
-  `Unauthorized` (nor `Overloaded`) and falls through to `ERROR_CODE_INTERNAL_SERVER_ERROR`. The
-  authorization decision is CORRECT — access is denied and no state is leaked — but the client/log
-  sees a misleading "internal server error" instead of "unauthorized", which hurts client handling
-  and ops triage. (`Overloaded` likely mis-maps the same way under backpressure.)
+- **Detail:** When the realtime kernel rejected a scope-escalation or cross-tenant handshake it
+  emitted `ServerErrorCode.Unauthorized`, but `RealtimeEnvelopeMapper.MapErrorCode` had no case for
+  `Unauthorized` (nor `Overloaded`) and fell through to `ERROR_CODE_INTERNAL_SERVER_ERROR`. The
+  authorization decision was always CORRECT — access denied, no state leaked — but the client/log
+  saw a misleading "internal server error" instead of "unauthorized".
 - **Discovered by:** `RealtimeScopeEscalationTests` / `TenantIsolationTests` over the wire (expected
-  `UNAUTHORIZED`, observed `INTERNAL_SERVER_ERROR`). Per the suite's mandate not to weaken a test or
-  patch production to make it pass, those tests now assert the security-decisive invariant
-  (rejected + no access granted) and this finding tracks the mis-map.
-- **Suggested fix:** add `ServerErrorCode.Unauthorized -> ErrorCode.Unauthorized` and
-  `ServerErrorCode.Overloaded -> ErrorCode.BackpressureRejected` (or `RateLimited`) to
-  `RealtimeEnvelopeMapper.MapErrorCode`, with a co-located mapper test.
-- **Status:** Open (newly discovered by this suite; not one of the four pre-fixed findings).
+  `UNAUTHORIZED`, observed `INTERNAL_SERVER_ERROR`).
+- **Fix:** `RealtimeEnvelopeMapper.MapErrorCode` now maps `ServerErrorCode.Unauthorized ->
+  ErrorCode.Unauthorized` and `ServerErrorCode.Overloaded -> ErrorCode.BackpressureRejected`, pinned
+  by the co-located `RealtimeEnvelopeMapper.Tests.cs` (full kernel->wire mapping table). The wire
+  suite now asserts the honest code: `TenantIsolationTests.CrossTenantJoinOverWebSocket_IsUnauthorized`
+  asserts `ErrorCode.Unauthorized`, and `RealtimeScopeEscalationTests` asserts any returned code is
+  `Unauthorized` (a clean close with no ServerError frame still denies access and is acceptable).
+- **Status:** Fixed.

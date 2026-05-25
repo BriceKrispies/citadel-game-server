@@ -195,6 +195,13 @@ public sealed class RealtimeEnvelopeMapper
         K.ServerErrorCode.NotJoined => ErrorCode.PlayerNotInRoom,
         K.ServerErrorCode.RoomUnavailable => ErrorCode.RoomNotFound,
         K.ServerErrorCode.MalformedMessage => ErrorCode.MalformedFrame,
+        // An authorization rejection (cross-tenant / scope-escalation handshake) must surface as
+        // UNAUTHORIZED on the wire, not a misleading INTERNAL_SERVER_ERROR — the decision is correct
+        // (access denied), but the client/log needs the honest code. (Finding 5.)
+        K.ServerErrorCode.Unauthorized => ErrorCode.Unauthorized,
+        // Load-shedding under backpressure (full room queue / admission cap) is a retryable
+        // BACKPRESSURE_REJECTED, not an internal fault.
+        K.ServerErrorCode.Overloaded => ErrorCode.BackpressureRejected,
         _ => ErrorCode.InternalServerError,
     };
 }

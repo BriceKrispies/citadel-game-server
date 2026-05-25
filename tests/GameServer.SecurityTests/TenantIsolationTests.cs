@@ -74,11 +74,11 @@ public sealed class TenantIsolationTests
         await using var client = await RealtimeWireClient.ConnectWithTokenAsync(Target, token, Ct);
         await client.SendAsync(WireEnvelopes.Hello(SecurityTarget.TenantB, ControlPlane.GameId), Ct);
 
-        // The server must reject and grant no access. (The wire code is INTERNAL_SERVER_ERROR today
-        // rather than UNAUTHORIZED — an information-fidelity gap tracked in FINDINGS.md — but the
-        // authorization decision is correct: access is denied.)
+        // The server must reject and grant no access, AND surface the honest wire code UNAUTHORIZED
+        // (Finding 5 fixed the mapper that previously fell through to INTERNAL_SERVER_ERROR).
         var outcome = await client.ReadUntilRejectedSnapshotOrCloseAsync(Ct);
         Assert.False(outcome.AccessWasGranted, "Cross-tenant connection was granted access.");
         Assert.True(outcome.WasRejected, "Cross-tenant hello was not rejected.");
+        Assert.Equal(ErrorCode.Unauthorized, outcome.ErrorCode);
     }
 }

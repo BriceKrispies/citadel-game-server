@@ -9,8 +9,8 @@ namespace GameServer.SecurityTests;
 /// <summary>
 /// What the server did in response to a handshake/command sequence: it rejected (a typed
 /// ServerError), granted access (a ServerSnapshot for the room), or closed the connection. For a
-/// security assertion the decisive fact is <see cref="AccessWasGranted"/> — a rejection's exact
-/// wire code is secondary (see FINDINGS.md on the Unauthorized→InternalServerError mapping gap).
+/// security assertion the decisive fact is <see cref="AccessWasGranted"/>; the rejection's wire code
+/// (<see cref="ErrorCode"/>) is also reported so a test can assert UNAUTHORIZED (Finding 5).
 /// </summary>
 public readonly record struct WireOutcome(bool WasRejected, bool AccessWasGranted, ErrorCode? ErrorCode)
 {
