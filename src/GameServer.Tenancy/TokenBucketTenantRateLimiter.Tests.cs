@@ -20,7 +20,11 @@ public sealed class TenantRateLimiterTests
     [Fact]
     public void Admits_UpToBurst_ThenThrottles()
     {
-        var limiter = new TokenBucketTenantRateLimiter(permitsPerSecond: 100, burst: 100);
+        // Frozen clock: no time passes during the loop, so exactly the burst is admitted and every
+        // request after it is throttled. Deterministic by construction — no wall-clock, no InRange
+        // slop (refill is covered by Refill_IsDriven_ByTheInjectedClock_Deterministically).
+        var clock = new FakeMonotonicClock();
+        var limiter = new TokenBucketTenantRateLimiter(permitsPerSecond: 100, burst: 100, clock);
         var tenant = new TenantId("tenant-a");
 
         var admitted = 0;
@@ -32,8 +36,9 @@ public sealed class TenantRateLimiterTests
             }
         }
 
-        // Burst is consumed; only a trickle of refill is admitted over the (sub-ms) loop.
-        Assert.InRange(admitted, 100, 200);
+        // Exactly the burst is admitted; the very next request is throttled.
+        Assert.Equal(100, admitted);
+        Assert.False(limiter.TryAcquire(tenant));
     }
 
     [Fact]

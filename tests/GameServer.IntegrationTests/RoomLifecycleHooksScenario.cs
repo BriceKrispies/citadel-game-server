@@ -1,4 +1,5 @@
 using GameServer.Protocol;
+using GameServer.Replication;
 using GameServer.Simulation;
 using GameServer.Transport;
 using Xunit;
@@ -81,6 +82,55 @@ public sealed class RoomLifecycleHooksScenario
         Assert.DoesNotContain(pushed, m => m.Payload is ServerSnapshot);
 
         _output.WriteLine("second join refused by the game's CanJoin rule with a typed NotJoined error.");
+    }
+
+    /// <summary>A sample game that refuses one named player but admits everyone else.</summary>
+    private sealed class BanListGame : IGameSimulation
+    {
+        private readonly string _banned;
+        private readonly HashSet<PlayerId> _players = new();
+
+        public BanListGame(string banned) => _banned = banned;
+
+        public bool CanJoin(PlayerId player) => player.Value != _banned;
+        public void Join(PlayerId player) => _players.Add(player);
+        public bool HasPlayer(PlayerId player) => _players.Contains(player);
+        public bool CanAccept(PlayerId player, string command) => true;
+        public void Apply(PlayerId player, string command) { }
+        public IReadOnlyList<EntitySnapshot> Project() =>
+            _players.Select(p => new EntitySnapshot(new EntityId(p.Value), 1, RelevanceKey.None, Array.Empty<byte>())).ToArray();
+        public byte[] Serialize() => Array.Empty<byte>();
+        public void Restore(byte[] state) { }
+    }
+
+    [Fact]
+    public async Task CanJoin_RefusingFirstJoinIntoNewRoom_StrandsNoRoom_AndAllowsLaterLegitJoin()
+    {
+        // The FIRST join into a brand-new room is refused by the game (isNewRoom=true + CanJoin=false):
+        // the room was created only for this refused join, so it must be torn down, leaving NO orphaned
+        // room — and crucially NOT blocking a later legitimate join into the same room key.
+        // Persist lifecycle so the LATER legit join's room stays observable after its client closes
+        // (under Reap a closed last-subscriber is reaped immediately, which would mask the assertion).
+        // The refused-first-join teardown under test runs regardless of lifecycle (HandleJoinAsync).
+        var harness = new IntegrationHarness(_ => new BanListGame("p-banned"), lifecycle: RoomLifecycle.Persist);
+        var key = harness.Key("tenant-a", "arena");
+
+        // Banned player attempts the very first join into the (not-yet-existing) room.
+        var refused = await harness.RunClientAsync("tenant-a", "arena", "p-banned", "demo", Array.Empty<string>());
+        Assert.Contains(refused.DrainOutbound(), m => m.Payload is ServerError err && err.Code == ServerErrorCode.NotJoined);
+
+        // No room was stranded by the refused first join.
+        Assert.DoesNotContain(key, harness.Server.ActiveRooms);
+        Assert.False(harness.Server.TryObserveRoom(key, out _));
+
+        // A later legitimate join into the SAME room key must succeed and create the room normally —
+        // proving the refused join left no half-created/blocking room behind.
+        await harness.JoinAsync("tenant-a", "arena", "p1");
+        Assert.Contains(key, harness.Server.ActiveRooms);
+        Assert.True(harness.Server.TryObserveRoom(key, out var obs));
+        Assert.Contains(obs.Entities, e => e.EntityId == "p1");
+
+        _output.WriteLine("refused first join stranded no room; a later legit join created the room cleanly.");
     }
 
     [Fact]
