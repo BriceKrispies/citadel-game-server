@@ -43,6 +43,7 @@
     <ProjectReference Include="..\..\src\GameServer.Transport\GameServer.Transport.csproj" />
     <ProjectReference Include="..\..\src\GameServer.Tenancy\GameServer.Tenancy.csproj" />
     <ProjectReference Include="..\..\src\GameServer.Routing\GameServer.Routing.csproj" />
+    <ProjectReference Include="..\..\src\GameServer.Cluster.Redis\GameServer.Cluster.Redis.csproj" />
     <ProjectReference Include="..\..\src\GameServer.Simulation\GameServer.Simulation.csproj" />
     <ProjectReference Include="..\..\src\GameServer.Persistence\GameServer.Persistence.csproj" />
     <ProjectReference Include="..\..\src\GameServer.Observability\GameServer.Observability.csproj" />

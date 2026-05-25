@@ -71,12 +71,32 @@ public sealed class CapacityAwareRoomPlacementTests
     }
 
     [Fact]
+    public void Place_ReclaimsRoomOwnedByANodeOutsideTheFleet()
+    {
+        // A node that owned this room was scaled down / removed from the fleet. Placement must not keep
+        // returning the dead owner (which would redirect clients to a dead address) — it re-places on a
+        // live node.
+        var directory = new FakeRoomDirectory();
+        var dead = new NodeId("node-removed");
+        var room = Room("r1");
+        directory.TryClaim(room, dead);
+
+        var result = Placement(directory, maxRoomsPerNode: 100).Place(room);
+
+        Assert.True(result.IsPlaced);
+        Assert.NotEqual(dead, result.Owner);
+        Assert.Contains(result.Owner, new[] { NodeA, NodeB });
+    }
+
+    [Fact]
     public void Place_UnderConcurrency_NeverExceedsClusterCapacity()
     {
         // 2 nodes × cap 2 = 4 slots; 16 distinct rooms placed concurrently. Capacity is a global
         // invariant: exactly 4 must be placed and the remaining 12 must report cluster-full — never
-        // more than the cap on any node, regardless of interleaving.
-        var directory = new FakeRoomDirectory();
+        // more than the cap on any node, regardless of interleaving. Uses the real thread-safe
+        // InMemoryRoomDirectory (not the fake) so the directory's own concurrency is exercised, not
+        // masked by the placement lock.
+        var directory = new InMemoryRoomDirectory();
         var placement = Placement(directory, maxRoomsPerNode: 2);
         const int rooms = 16;
 

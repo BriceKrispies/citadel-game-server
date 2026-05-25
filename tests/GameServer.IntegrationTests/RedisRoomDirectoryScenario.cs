@@ -69,6 +69,20 @@ public sealed class RedisRoomDirectoryScenario
             Assert.Equal(RoomPlacementStatus.ClusterAtCapacity, p3.Status);
             Assert.Equal(p1.Owner, placement.Place(new RoomKey(new TenantId("tenant-a"), new RoomId("r1"))).Owner); // idempotent
 
+            // Tenant isolation: slash-bearing ids that would naively collide must stay distinct rooms.
+            var collideLeft = new RoomKey(new TenantId("a/b"), new RoomId("c"));
+            var collideRight = new RoomKey(new TenantId("a"), new RoomId("b/c"));
+            Assert.True(fromNodeA.TryClaim(collideLeft, nodeA));
+            Assert.True(fromNodeA.TryClaim(collideRight, nodeB)); // does NOT collide with collideLeft
+            Assert.True(fromNodeA.TryGetOwner(collideLeft, out var leftOwner) && leftOwner.Equals(nodeA));
+            Assert.True(fromNodeA.TryGetOwner(collideRight, out var rightOwner) && rightOwner.Equals(nodeB));
+
+            // Lease renewal: re-claiming as the current owner refreshes the lease (idempotent true).
+            var renewRoom = new RoomKey(new TenantId("tenant-a"), new RoomId("renew"));
+            Assert.True(fromNodeA.TryClaim(renewRoom, nodeA));
+            Assert.True(fromNodeA.TryClaim(renewRoom, nodeA));        // renewal keeps ownership
+            Assert.False(fromNodeB.TryClaim(renewRoom, nodeB));       // still fenced after renewal
+
             _output.WriteLine($"redis cluster verified: arena owner={owner.Value}; r1={p1.Owner.Value}, r2={p2.Owner.Value}, r3=full");
         }
     }

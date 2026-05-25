@@ -161,5 +161,12 @@ The Host (`Program.cs`) selects the backend by config (`Cluster:Backend` = InMem
 `Cluster:NodeId`, `Cluster:Nodes`, `Cluster:MaxRoomsPerNode`). Room creation places the room (`503` if
 the cluster is full); `/realtime/v1/connect` consults affinity before accepting the socket and answers
 `409` with the owner's address when a connection lands on a non-owner, so a non-owner never stands up a
-second copy of a room. End-to-end behavior is pinned by `ClusterRoutingHostScenario` (two Hosts sharing
-one directory).
+second copy of a room. The connect path secures ownership through capacity-aware placement (not a raw
+claim) and fails closed (`503`) if the directory is unavailable. End-to-end behavior is pinned by
+`ClusterRoutingHostScenario` (two Hosts sharing one directory).
+
+Ownership is a renewable lease, so a long-lived room cannot silently lose its owner: a supervised
+`RoomLeaseRenewalService` renews each served room well inside the lease window, and `RealtimeServer`
+releases a room's directory claim when it reaps the room — so capacity counts track live rooms and a
+dead node's rooms free themselves when its lease lapses. Redis keys percent-escape the tenant/room
+segments so distinct `(tenant, room)` pairs can never collide on one owner key.

@@ -19,6 +19,11 @@ public readonly record struct NodeId(string Value);
 /// real cross-node ownership behind this same contract — the InMemory↔distributed split mirrors
 /// InMemory↔durable snapshot stores. All implementations must claim atomically (fence concurrent claimers),
 /// release only for the current owner, and count by owner.
+///
+/// Ownership is a renewable LEASE: a distributed backend may expire a claim after a bounded window, so an
+/// owner must renew while it holds a room (the host runs a renewal worker) and release on teardown. The
+/// in-memory backend's lease is effectively infinite — a valid lease duration — so a renewing caller
+/// behaves identically on both backends.
 /// </remarks>
 public interface IRoomDirectory
 {

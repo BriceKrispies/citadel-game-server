@@ -46,6 +46,7 @@ public sealed class ClusterRoutingHostScenario
         // Mint a join token for that room.
         var mint = await operatorA.PostAsJsonAsync($"/api/v1/rooms/{roomId}/join-token", new { playerId = "p1" });
         mint.EnsureSuccessStatusCode();
+        Assert.Equal(NodeA, mint.Headers.GetValues("X-Citadel-Owner-Node").Single()); // owner hint for direct connect
         var token = (await mint.Content.ReadFromJsonAsync<TokenDto>())!.Token;
         var connect = $"/realtime/v1/connect?joinToken={Uri.EscapeDataString(token)}";
 

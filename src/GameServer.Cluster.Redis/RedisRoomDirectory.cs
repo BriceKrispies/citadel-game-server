@@ -6,14 +6,15 @@ namespace GameServer.Cluster.Redis;
 /// <summary>Tuning for the Redis-backed cluster directory/placement.</summary>
 /// <param name="KeyPrefix">Namespace for all keys, so multiple environments can share a server.</param>
 /// <param name="LeaseMs">
-/// How long a claim lives without renewal. A node renews by re-claiming its rooms; if a node dies, its
-/// claims expire after this window and the rooms become reclaimable — and drop out of capacity counts
-/// automatically (counts are by un-expired lease, see <see cref="RedisRoomDirectory.OwnedCount"/>).
+/// How long a claim lives without renewal. A live node renews its rooms well inside this window via the
+/// host's lease-renewal worker (which re-claims each served room — see <c>RoomLeaseRenewalService</c>);
+/// if a node dies, its claims expire after this window and the rooms become reclaimable, dropping out of
+/// capacity counts automatically (counts are by un-expired lease, see <see cref="RedisRoomDirectory.OwnedCount"/>).
 /// </param>
 public sealed record RedisClusterOptions(string KeyPrefix = "citadel", int LeaseMs = 30_000);
 
 /// <summary>Builds the Redis keys/members shared by the directory and placement adapters.</summary>
-internal static class RedisClusterKeys
+public static class RedisClusterKeys
 {
     // Segments are percent-escaped so the encoding is INJECTIVE: '/' (the separator), ':' (the key
     // delimiter) and '{' '}' (Redis cluster hash-tag markers) cannot appear raw inside a segment.

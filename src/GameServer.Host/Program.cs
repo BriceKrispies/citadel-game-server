@@ -20,6 +20,15 @@ using StackExchange.Redis;
 var builder = WebApplication.CreateBuilder(args);
 builder.WebHost.UseUrls("http://localhost:5000");
 
+// ---- Cluster identity (used by the realtime kernel and the clustering services below) -------
+// NodeId is this node's externally-reachable base address, so an affinity redirect can carry it
+// directly. The fleet is the set of nodes placement may assign rooms to (defaults to just this node).
+var localNode = new NodeId(builder.Configuration["Cluster:NodeId"] ?? "http://localhost:5000");
+var fleetNodes = builder.Configuration.GetSection("Cluster:Nodes").Get<string[]>() is { Length: > 0 } configuredNodes
+    ? configuredNodes.Select(n => new NodeId(n)).ToArray()
+    : new[] { localNode };
+var maxRoomsPerNode = builder.Configuration.GetValue("Cluster:MaxRoomsPerNode", 10_000);
+
 // Render enums (e.g. ReplicationPolicy modes) as readable strings in the HTTP API.
 builder.Services.ConfigureHttpJsonOptions(o => o.SerializerOptions.Converters.Add(new JsonStringEnumConverter()));
 
@@ -68,7 +77,11 @@ builder.Services.AddSingleton<RealtimeServer>(sp => new RealtimeServer(
     admission: admissionPolicy,
     // Keep a trailing window of room events; older events are covered by the saved
     // snapshot and compacted away, so the event log cannot grow without bound.
-    eventLogRetentionTicks: 256));
+    eventLogRetentionTicks: 256,
+    // Release this node's room ownership claim as a room is reaped, so directory ownership tracks
+    // live rooms (otherwise OwnedCount only grows and placement eventually wedges).
+    roomDirectory: sp.GetRequiredService<IRoomDirectory>(),
+    localNode: localNode));
 // Rooms are independent state owners, so tick them concurrently across all cores; one
 // slow room must not block the rest (head-of-line blocking).
 builder.Services.AddSingleton<IRoomTickScheduler>(_ => ParallelRoomTickScheduler.ForProcessorCount());
@@ -165,14 +178,7 @@ builder.Services.AddSingleton<IAuditLog, InMemoryAuditLog>();
 // nodes — see MultiNodeOwnershipScenario). The directory is the source of truth; placement assigns
 // owners capacity-aware; the affinity router redirects a connection that landed on a non-owner. The
 // backend is config-selected: in-memory for a single node / dev (authoritative for THIS process only),
-// Redis for a real fleet — same contracts, like InMemory↔durable snapshot stores. NodeId is this
-// node's reachable base address, so a redirect can carry it directly.
-var localNode = new NodeId(builder.Configuration["Cluster:NodeId"] ?? "http://localhost:5000");
-var fleetNodes = builder.Configuration.GetSection("Cluster:Nodes").Get<string[]>() is { Length: > 0 } configuredNodes
-    ? configuredNodes.Select(n => new NodeId(n)).ToArray()
-    : new[] { localNode };
-var maxRoomsPerNode = builder.Configuration.GetValue("Cluster:MaxRoomsPerNode", 10_000);
-
+// Redis for a real fleet — same contracts, like InMemory↔durable snapshot stores.
 if (string.Equals(builder.Configuration["Cluster:Backend"], "Redis", StringComparison.OrdinalIgnoreCase))
 {
     var redisConnection = builder.Configuration["Cluster:Redis:ConnectionString"]
@@ -190,6 +196,19 @@ else
 
 builder.Services.AddSingleton<IRoomAffinityRouter>(sp => new DirectoryRoomAffinityRouter(sp.GetRequiredService<IRoomDirectory>(), localNode));
 
+// Renew this node's room-ownership leases while it serves them, well inside the lease window, so a
+// distributed lease never lapses under a live room (which would let another node claim it — split
+// brain). For the in-memory directory (no expiry) this is a cheap idempotent no-op. Supervised like
+// the other long-running loops.
+var leaseRenewalInterval = TimeSpan.FromSeconds(builder.Configuration.GetValue("Cluster:LeaseRenewalSeconds", 10));
+builder.Services.AddSingleton<RoomLeaseRenewalService>(sp => new RoomLeaseRenewalService(
+    sp.GetRequiredService<RealtimeServer>(),
+    sp.GetRequiredService<IRoomDirectory>(),
+    localNode,
+    leaseRenewalInterval,
+    sp.GetRequiredService<ILogger<RoomLeaseRenewalService>>()));
+builder.Services.AddSingleton<ISupervisedWorker>(sp => sp.GetRequiredService<RoomLeaseRenewalService>());
+
 var app = builder.Build();
 
 // Cap a single reassembled realtime message so one connection cannot force the server to
@@ -205,7 +224,21 @@ app.UseWebSockets();
 // Control-plane HTTP API. JSON DTOs; session lifecycle only; no gameplay logic.
 // ============================================================================
 app.MapGet("/health", () => Results.Ok(new { status = "healthy" }));
-app.MapGet("/ready", () => Results.Ok(new { status = "ready" }));
+// Readiness proves the node can actually do useful work: when a distributed room directory is
+// configured, the node is not ready until it can reach it (otherwise it would accept connections it
+// cannot place or fence). With the in-memory backend there is nothing external to check.
+app.MapGet("/ready", (IServiceProvider sp) =>
+{
+    var multiplexer = sp.GetService<IConnectionMultiplexer>();
+    if (multiplexer is not null && !multiplexer.IsConnected)
+    {
+        return Results.Json(
+            new { status = "not-ready", reason = "room directory (redis) is not connected" },
+            statusCode: StatusCodes.Status503ServiceUnavailable);
+    }
+
+    return Results.Ok(new { status = "ready" });
+});
 app.MapGet("/version", () => Results.Ok(new
 {
     protocolVersion = ProtocolVersions.Current,
@@ -452,30 +485,51 @@ app.Map("/realtime/v1/connect", branch => branch.Run(async context =>
     // Room affinity: this connection must be handled by the node that owns the room. A connection that
     // landed on a non-owner is redirected (409 + the owner's address) before any socket is accepted —
     // this is what stops a non-owner from standing up a second authoritative copy of the room (split
-    // brain). Checked before the upgrade guard so a misrouted client is told where to go regardless.
+    // brain). Fail-closed: if the directory is unavailable we reject (503) rather than serve unclaimed.
     var claims = verification.Claims!;
     var roomKey = new RoomKey(new TenantId(claims.TenantId), new RoomId(claims.RoomId));
-    var directory = context.RequestServices.GetRequiredService<IRoomDirectory>();
-    var decision = context.RequestServices.GetRequiredService<IRoomAffinityRouter>().Resolve(roomKey);
-    if (decision.Kind == RouteKind.Redirect)
+
+    var placement = RoomPlacementResult.ClusterAtCapacity;
+    try
     {
-        await WriteWrongNodeAsync(context, decision.Owner);
+        // Fast path: a LIVE node already owns it and it's not us → redirect without a write. A dead /
+        // unknown owner falls through to placement, which validates ownership against the live fleet.
+        var decision = context.RequestServices.GetRequiredService<IRoomAffinityRouter>().Resolve(roomKey);
+        if (decision.Kind == RouteKind.Redirect && fleetNodes.Contains(decision.Owner))
+        {
+            await WriteWrongNodeAsync(context, decision.Owner);
+            return;
+        }
+
+        if (!context.WebSockets.IsWebSocketRequest)
+        {
+            context.Response.StatusCode = StatusCodes.Status400BadRequest;
+            await context.Response.WriteAsJsonAsync(new ApiError("MalformedFrame", "A WebSocket upgrade is required."));
+            return;
+        }
+
+        // Secure ownership through PLACEMENT, not a raw claim, so the connect path is capacity-aware:
+        // it returns the room's existing (live) owner, assigns a capacity-checked one, or reports full.
+        placement = context.RequestServices.GetRequiredService<IRoomPlacement>().Place(roomKey);
+    }
+    catch (Exception ex) when (ex is RedisException or RedisTimeoutException)
+    {
+        context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+        await context.Response.WriteAsJsonAsync(new ApiError("DirectoryUnavailable", "Room directory is unavailable; retry shortly."));
         return;
     }
 
-    if (!context.WebSockets.IsWebSocketRequest)
+    if (!placement.IsPlaced)
     {
-        context.Response.StatusCode = StatusCodes.Status400BadRequest;
-        await context.Response.WriteAsJsonAsync(new ApiError("MalformedFrame", "A WebSocket upgrade is required."));
+        context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+        await context.Response.WriteAsJsonAsync(new ApiError("ClusterAtCapacity", "No node has capacity for this room; retry shortly."));
         return;
     }
 
-    // Resolve said local (we own it) or unowned. Secure ownership for this node — idempotent if already
-    // ours, a fresh claim if unowned. If we lose the claim race to another node, redirect to the winner.
-    if (!directory.TryClaim(roomKey, localNode))
+    if (!placement.Owner.Equals(localNode))
     {
-        directory.TryGetOwner(roomKey, out var owner);
-        await WriteWrongNodeAsync(context, owner);
+        // Placement assigned (or confirmed) another node as owner — redirect there.
+        await WriteWrongNodeAsync(context, placement.Owner);
         return;
     }
 
