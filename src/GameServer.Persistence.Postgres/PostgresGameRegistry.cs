@@ -174,6 +174,14 @@ public sealed class PostgresGameRegistry : IGameRegistry
         }
     }
 
+    public bool TryGetOwningTenant(string gameId, out string owningTenantId)
+    {
+        lock (_gate)
+        {
+            return _gameTenant.TryGetValue(gameId, out owningTenantId!);
+        }
+    }
+
     public IReadOnlyList<GameSummary> List()
     {
         lock (_gate)

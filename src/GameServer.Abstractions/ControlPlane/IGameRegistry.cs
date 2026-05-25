@@ -38,6 +38,14 @@ public interface IGameRegistry
 
     bool TryGet(string gameId, out GameDetail game);
 
+    /// <summary>
+    /// The tenant that owns <paramref name="gameId"/>, or false if the game is unknown. A game is
+    /// tenant-scoped data, so a mutation (delete/version) MUST be authorized against the owning tenant
+    /// rather than the caller's own tenant — otherwise a game-admin of one tenant could mutate another
+    /// tenant's game by id.
+    /// </summary>
+    bool TryGetOwningTenant(string gameId, out string owningTenantId);
+
     IReadOnlyList<GameSummary> List();
 
     bool TryDeleteGame(string gameId);

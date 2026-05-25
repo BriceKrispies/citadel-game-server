@@ -52,6 +52,37 @@ public sealed class InMemoryGameCatalogTests
     }
 
     [Fact]
+    public void TryGetOwningTenant_RecordsTheCreatorTenant_ForAuthorization()
+    {
+        var catalog = new InMemoryGameCatalog();
+
+        Assert.True(catalog.TryCreateGame("tenant-a", new GameDetail("owned", "Owned", "", 1)));
+
+        // The mutation gate authorizes against THIS owner, never the caller's own tenant.
+        Assert.True(catalog.TryGetOwningTenant("owned", out var owner));
+        Assert.Equal("tenant-a", owner);
+
+        // Unknown game has no owner.
+        Assert.False(catalog.TryGetOwningTenant("no-such-game", out _));
+
+        // A seeded demo game is owned by no real tenant, so no game-admin's tenant matches it (only a
+        // platform-admin, who can act for any tenant, may mutate it).
+        Assert.True(catalog.TryGetOwningTenant("demo-game", out var seededOwner));
+        Assert.NotEqual("tenant-a", seededOwner);
+        Assert.NotEqual("tenant-b", seededOwner);
+    }
+
+    [Fact]
+    public void DeleteGame_ClearsOwnership()
+    {
+        var catalog = new InMemoryGameCatalog();
+
+        Assert.True(catalog.TryCreateGame("tenant-a", new GameDetail("owned", "Owned", "", 1)));
+        Assert.True(catalog.TryDeleteGame("owned"));
+        Assert.False(catalog.TryGetOwningTenant("owned", out _));
+    }
+
+    [Fact]
     public void CreateGame_DuplicateId_IsRejected()
     {
         var catalog = new InMemoryGameCatalog();

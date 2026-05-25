@@ -605,10 +605,14 @@ api.MapPost("/games", (HttpContext ctx, CreateGameRequest request, IGameRegistry
 // catalog so a caller cannot register a version for a game it does not own.)
 api.MapPost("/games/{gameId}/versions", (HttpContext ctx, string gameId, CreateGameVersionRequest request, IGameRegistry catalog, IAuditLog audit, IClock clock) =>
 {
-    var caller = (CallerPrincipal)ctx.Items["caller"]!;
-    // Least-privilege: must be able to mutate, and (for a non-platform caller) the game must belong to a
-    // tenant it can act for. We approximate ownership by the caller's own tenant when not platform-admin.
-    var owningTenant = caller.IsPlatformAdmin ? caller.TenantId : caller.TenantId;
+    // Least-privilege: must be able to mutate, AND (for a non-platform caller) be authorized for the
+    // game's OWNING tenant — never merely the caller's own tenant, or a game-admin of one tenant could
+    // version another tenant's game by id. Resolve ownership from the registry, the source of truth.
+    if (!catalog.TryGetOwningTenant(gameId, out var owningTenant))
+    {
+        return Results.NotFound(new ApiError("GameNotFound", $"Game '{gameId}' was not found."));
+    }
+
     var target = $"{owningTenant}/{gameId}@v{request.SchemaVersion}";
     if (ForbidMutation(ctx, owningTenant, "create-game-version", target, audit, clock) is { } denied)
     {
@@ -636,8 +640,15 @@ api.MapGet("/games/{gameId}/versions", (string gameId, IGameRegistry catalog) =>
 
 api.MapDelete("/games/{gameId}", (HttpContext ctx, string gameId, IGameRegistry catalog, IAuditLog audit, IClock clock) =>
 {
-    var caller = (CallerPrincipal)ctx.Items["caller"]!;
-    if (ForbidMutation(ctx, caller.TenantId, "delete-game", gameId, audit, clock) is { } denied)
+    // A game is tenant-scoped data: authorize the DELETE against the game's OWNING tenant (resolved from
+    // the registry), not the caller's own tenant — otherwise a game-admin of one tenant could delete
+    // another tenant's game by id (and, on the durable backend, route the delete into the victim's database).
+    if (!catalog.TryGetOwningTenant(gameId, out var owningTenant))
+    {
+        return Results.NotFound(new ApiError("GameNotFound", $"Game '{gameId}' was not found."));
+    }
+
+    if (ForbidMutation(ctx, owningTenant, "delete-game", gameId, audit, clock) is { } denied)
     {
         return denied;
     }
@@ -647,7 +658,7 @@ api.MapDelete("/games/{gameId}", (HttpContext ctx, string gameId, IGameRegistry 
         return Results.NotFound(new ApiError("GameNotFound", $"Game '{gameId}' was not found."));
     }
 
-    Audit(ctx, "delete-game", gameId, audit, clock, caller.TenantId);
+    Audit(ctx, "delete-game", gameId, audit, clock, owningTenant);
     return Results.NoContent();
 });
 
