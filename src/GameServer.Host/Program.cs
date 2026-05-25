@@ -123,7 +123,17 @@ builder.Services.AddSingleton<ITenantRateLimiter>(sp => new TokenBucketTenantRat
 // Long-running loops run as supervised workers, not bare hosted services: the supervisor
 // restarts a faulting worker (counted as worker_restart_count) instead of letting an
 // unhandled fault stop the whole host, and drains them within a bounded budget on shutdown.
-builder.Services.AddSingleton<RoomTickService>();
+// Authoritative cadence is configurable (Realtime:TickHz, default 10 Hz) so a scenario can
+// drive 30 Hz without recompiling; the simulation kernel stays wall-clock-free — only this
+// host-side driver knows the rate.
+var tickHz = builder.Configuration.GetValue("Realtime:TickHz", RoomTickService.DefaultTickHz);
+builder.Services.AddSingleton<RoomTickService>(sp => new RoomTickService(
+    sp.GetRequiredService<RealtimeServer>(),
+    sp.GetRequiredService<IRoomTickScheduler>(),
+    sp.GetRequiredService<ITelemetrySink>(),
+    sp.GetRequiredService<RoomScopedMetrics>(),
+    sp.GetRequiredService<ILogger<RoomTickService>>(),
+    tickHz));
 builder.Services.AddSingleton<ISupervisedWorker>(sp => sp.GetRequiredService<RoomTickService>());
 builder.Services.AddSingleton<TelemetryFlushService>();
 builder.Services.AddSingleton<ISupervisedWorker>(sp => sp.GetRequiredService<TelemetryFlushService>());

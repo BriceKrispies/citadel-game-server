@@ -20,8 +20,10 @@ namespace GameServer.Host;
 /// </remarks>
 public sealed class RoomTickService : ISupervisedWorker
 {
-    private static readonly TimeSpan TickInterval = TimeSpan.FromMilliseconds(100);
+    /// <summary>The default authoritative cadence when <c>Realtime:TickHz</c> is unset (10 Hz).</summary>
+    public const double DefaultTickHz = 10.0;
 
+    private readonly TimeSpan _tickInterval;
     private readonly RealtimeServer _server;
     private readonly IRoomTickScheduler _scheduler;
     private readonly ITelemetrySink _telemetry;
@@ -33,20 +35,36 @@ public sealed class RoomTickService : ISupervisedWorker
         IRoomTickScheduler scheduler,
         ITelemetrySink telemetry,
         RoomScopedMetrics roomMetrics,
-        ILogger<RoomTickService> logger)
+        ILogger<RoomTickService> logger,
+        double tickHz = DefaultTickHz)
     {
         _server = server;
         _scheduler = scheduler;
         _telemetry = telemetry;
         _roomMetrics = roomMetrics;
         _logger = logger;
+        _tickInterval = IntervalForHz(tickHz);
+    }
+
+    /// <summary>The wall-clock interval between authoritative tick cycles (1 / Hz).</summary>
+    public TimeSpan TickInterval => _tickInterval;
+
+    /// <summary>Converts a positive tick rate (Hz) to the cadence interval, guarding bad config.</summary>
+    public static TimeSpan IntervalForHz(double tickHz)
+    {
+        if (tickHz <= 0 || double.IsNaN(tickHz) || double.IsInfinity(tickHz))
+        {
+            tickHz = DefaultTickHz;
+        }
+
+        return TimeSpan.FromMilliseconds(1000.0 / tickHz);
     }
 
     public string Name => "room-tick";
 
     public async Task RunAsync(CancellationToken cancellationToken)
     {
-        using var timer = new PeriodicTimer(TickInterval);
+        using var timer = new PeriodicTimer(_tickInterval);
 
         while (await timer.WaitForNextTickAsync(cancellationToken).ConfigureAwait(false))
         {
@@ -59,7 +77,7 @@ public sealed class RoomTickService : ISupervisedWorker
             var report = await _scheduler.TickCycleAsync(rooms, TickRoomResiliently, cancellationToken).ConfigureAwait(false);
 
             _telemetry.Measure(TelemetryMetrics.TickDurationMs, report.TotalElapsedMs);
-            if (report.TotalElapsedMs > TickInterval.TotalMilliseconds)
+            if (report.TotalElapsedMs > _tickInterval.TotalMilliseconds)
             {
                 // The cadence iteration did not fit in the tick budget.
                 _telemetry.Increment(TelemetryMetrics.MissedTicks);
