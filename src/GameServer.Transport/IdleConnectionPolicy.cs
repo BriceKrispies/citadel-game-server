@@ -14,18 +14,16 @@ public enum IdleAction
 }
 
 /// <summary>
-/// Decides when an otherwise-silent connection should be pinged or reaped. Today the
-/// connection loop <c>await</c>s <see cref="IClientCommandReceiver.ReceiveAsync"/> with no
-/// deadline, so a client that stops sending (a half-open socket, a frozen device) parks a
-/// server task and its buffers forever — at 100k connections even a tiny fraction of zombies
-/// is a standing leak. A hardened loop consults this policy on a timer: ping at the heartbeat
-/// interval, and close with <c>DisconnectReason.IdleTimeout</c> once the idle deadline passes.
+/// Decides when an otherwise-silent connection should be pinged or reaped. A client that stops
+/// sending (a half-open socket, a frozen device) would otherwise park a server task and its
+/// buffers forever — at 100k connections even a tiny fraction of zombies is a standing leak.
 /// </summary>
 /// <remarks>
-/// RED-phase seam: the contract exists so the idle-reaping behavior can be pinned by a test
-/// (<c>IdleConnectionScenario</c>); the evaluation and the loop's use of it are not built yet.
-/// The wire protocol already defines <c>DisconnectReason.IdleTimeout</c> and ping/pong; nothing
-/// drives them.
+/// Partially wired: the connection loop already reaps on <see cref="IdleTimeout"/> (a short
+/// pre-hello handshake deadline and a longer post-hello idle deadline — see
+/// <c>RealtimeServer.HandleConnectionAsync</c>), pinned by <c>IdleConnectionScenario</c>. Not yet
+/// driven: heartbeat liveness — calling <see cref="Evaluate"/> on a timer to emit a server ping
+/// (the proto defines ping/pong and <c>DisconnectReason.IdleTimeout</c>) before the idle deadline.
 /// </remarks>
 public interface IIdleConnectionPolicy
 {

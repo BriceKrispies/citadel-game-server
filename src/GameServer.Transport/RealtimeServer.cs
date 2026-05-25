@@ -37,10 +37,11 @@ public enum RoomLifecycle
 /// counted (<c>admission_rejected</c> with a reason), never silent.
 /// </summary>
 /// <remarks>
-/// <see cref="MaxRoomsPerTenant"/> is a RED-phase seam: the property exists so a noisy-neighbor
-/// test (<c>PerTenantRoomCapScenario</c>) can pin the behavior, but the edge does not enforce a
-/// per-tenant room ceiling yet — only the global <see cref="MaxRooms"/> is enforced, which one
-/// tenant can exhaust to starve the others.
+/// Both global and per-tenant ceilings are enforced at the edge: <see cref="MaxConnections"/> /
+/// <see cref="MaxConnectionsPerTenant"/> on connect, and <see cref="MaxRooms"/> /
+/// <see cref="MaxRoomsPerTenant"/> on room creation (see <c>HandleJoinAsync</c>), so one tenant
+/// cannot exhaust global room capacity and starve the others. Pinned by
+/// <c>PerTenantRoomCapScenario</c>.
 /// </remarks>
 public sealed record AdmissionPolicy(
     int MaxConnections = int.MaxValue,
