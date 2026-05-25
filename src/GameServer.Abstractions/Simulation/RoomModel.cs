@@ -25,7 +25,24 @@ public enum CommandAdmission
 /// stores and restores these without interpreting them; only the game understands
 /// <see cref="State"/>.
 /// </summary>
-public sealed record RoomSnapshot(long Tick, byte[] State);
+/// <remarks>
+/// <para>
+/// <see cref="Seed"/> and <see cref="GameSchemaVersion"/> form the cross-process REPLAY
+/// HEADER. A snapshot alone restores state at <see cref="Tick"/>; to replay the events
+/// recorded AFTER the snapshot to the identical entity state on a FRESH process, the room's
+/// deterministic random source must be re-seeded with the exact seed the original room used —
+/// otherwise any stochastic rule diverges and replay is non-deterministic. The schema version
+/// records which game-state layout produced <see cref="State"/>, so a restore against an
+/// incompatible game build can be detected rather than silently mis-deserialized.
+/// </para>
+/// <para>
+/// Both are trailing, defaulted parameters so this stays BACK-COMPATIBLE: every existing
+/// <c>new RoomSnapshot(tick, state)</c> caller compiles unchanged, and a previously-persisted
+/// snapshot JSON (without these fields) deserializes with the defaults — a seed of 0 and an
+/// unversioned schema, exactly the pre-header behavior.
+/// </para>
+/// </remarks>
+public sealed record RoomSnapshot(long Tick, byte[] State, int Seed = 0, int GameSchemaVersion = 0);
 
 /// <summary>
 /// A durable fact for the event log / replay: a player's accepted command at a tick.

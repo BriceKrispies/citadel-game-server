@@ -103,16 +103,30 @@ public sealed class GameRoom : IGameRoom
             events.Add(new RoomEvent(tick, command.Player, command.Command));
         }
 
-        return new TickResult(new RoomSnapshot(tick, _game.Serialize()), events);
+        return new TickResult(NewSnapshot(tick), events);
     }
 
     public IReadOnlyList<EntitySnapshot> Project() => _game.Project();
 
-    public RoomSnapshot Snapshot() => new(_clock.CurrentTick, _game.Serialize());
+    public RoomSnapshot Snapshot() => NewSnapshot(_clock.CurrentTick);
+
+    // Capture the replay header (seed + game-schema version) alongside the opaque state, so a
+    // FRESH process can re-seed an identical random source and replay post-snapshot events to the
+    // identical state. The seed comes from THIS room's deterministic source — never wall-clock.
+    private RoomSnapshot NewSnapshot(long tick) =>
+        new(tick, _game.Serialize(), _random.Seed, _game.SchemaVersion);
 
     public void RestoreFrom(RoomSnapshot snapshot)
     {
         _game.Restore(snapshot.State);
+
+        // Re-establish the deterministic random sequence from the captured seed so any stochastic
+        // rule replays identically on this (possibly fresh) process. A legacy snapshot without a
+        // header (Seed == 0) leaves the source on its construction seed — the pre-header behavior.
+        if (snapshot.Seed != 0)
+        {
+            _random.Reseed(snapshot.Seed);
+        }
 
         // A restored room starts with no pending input; per-player sequence gating
         // restarts from the recovered baseline (sequence state is not snapshotted).

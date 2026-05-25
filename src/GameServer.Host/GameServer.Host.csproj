@@ -19,6 +19,7 @@
     <ProjectReference Include="..\GameServer.Simulation\GameServer.Simulation.csproj" />
     <ProjectReference Include="..\GameServer.ControlPlane\GameServer.ControlPlane.csproj" />
     <ProjectReference Include="..\GameServer.Persistence\GameServer.Persistence.csproj" />
+    <ProjectReference Include="..\GameServer.Persistence.Postgres\GameServer.Persistence.Postgres.csproj" />
     <ProjectReference Include="..\GameServer.Observability\GameServer.Observability.csproj" />
     <ProjectReference Include="..\GameServer.Cluster.Redis\GameServer.Cluster.Redis.csproj" />
   </ItemGroup>

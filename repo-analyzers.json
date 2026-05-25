@@ -27,6 +27,7 @@
       "GameServer.Tenancy": 1,
       "GameServer.Identity": 1,
       "GameServer.Persistence": 1,
+      "GameServer.Persistence.Postgres": 1,
       "GameServer.Observability": 1,
       "GameServer.ControlPlane": 1,
 

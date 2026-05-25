@@ -1,3 +1,4 @@
+using GameServer.Persistence;
 using GameServer.Protocol;
 using GameServer.Replication;
 using GameServer.Simulation.Testing;
@@ -133,13 +134,102 @@ public sealed class GameRoomTests
         Assert.Equal(CommandAdmission.Accepted, room.TryEnqueue(Player, "Go", 5));
     }
 
+    [Fact]
+    public void Snapshot_CapturesReplayHeader_SeedAndSchemaVersion()
+    {
+        var game = new FakeGame(schemaVersion: 7);
+        var room = new GameRoom(
+            new RoomId("arena"), game, new FakeSimulationClock(), new DeterministicRandomSource(seed: 4242));
+
+        var snapshot = room.Snapshot();
+
+        Assert.Equal(4242, snapshot.Seed);
+        Assert.Equal(7, snapshot.GameSchemaVersion);
+    }
+
+    [Fact]
+    public void RestoreFrom_ReseedsRandomSource_FromCapturedSeed()
+    {
+        // A fresh source on a different construction seed, restored from a snapshot whose header
+        // carries a known seed, must reproduce that seed's stream — the cross-process replay
+        // invariant in the small.
+        var random = new DeterministicRandomSource(seed: 1);
+        var room = new GameRoom(new RoomId("arena"), new FakeGame(), new FakeSimulationClock(), random);
+
+        room.RestoreFrom(new RoomSnapshot(0, Array.Empty<byte>(), Seed: 999, GameSchemaVersion: 1));
+
+        Assert.Equal(999, random.Seed);
+        Assert.Equal(new DeterministicRandomSource(seed: 999).Next(1_000_000), random.Next(1_000_000));
+    }
+
+    [Fact]
+    public void RestoreFrom_LegacyHeaderlessSnapshot_LeavesConstructionSeed()
+    {
+        // A snapshot persisted before the replay header existed deserializes with Seed == 0; restore
+        // must NOT reseed to 0 (back-compat: the source keeps its construction seed).
+        var random = new DeterministicRandomSource(seed: 5);
+        var room = new GameRoom(new RoomId("arena"), new FakeGame(), new FakeSimulationClock(), random);
+
+        room.RestoreFrom(new RoomSnapshot(0, Array.Empty<byte>())); // no header
+
+        Assert.Equal(5, random.Seed);
+    }
+
+    [Fact]
+    public void DeterministicReplayWithSeed_FreshRoom_FromSnapshotPlusEvents_YieldsIdenticalState()
+    {
+        // #6 (hermetic): a fresh room + the captured snapshot header (seed + schema) + the recorded
+        // post-snapshot events must reach the SAME entity state, with NO wall-clock involved. This is
+        // the in-memory proof of the cross-process replay invariant; the Postgres-gated integration
+        // test exercises the same path through a durable store.
+        var snapshots = new InMemorySnapshotStore<RoomId, RoomSnapshot>();
+        var events = new InMemoryEventLog<RoomId, RoomEvent>(e => e.Tick);
+        var roomId = new RoomId("arena");
+
+        // --- original room: take an empty baseline snapshot, then run moves recorded as events ---
+        var original = new GameRoom(roomId, new MoveRightGame(), new FakeSimulationClock(), new SeededRandomSource(seed: 7));
+        original.Join(Player);
+        snapshots.Save(roomId, original.Snapshot()); // baseline at tick 0 (header captured)
+        for (var seq = 1; seq <= 3; seq++)
+        {
+            original.TryEnqueue(Player, MoveRightGame.MoveRight, seq);
+        }
+
+        foreach (var produced in original.Tick().Events)
+        {
+            events.Append(roomId, produced);
+        }
+
+        var originalX = MoveRightGame.DecodeX(original.Project().Single().Payload);
+
+        // --- fresh room (simulated new process): restore from the header, replay the events ---
+        Assert.True(snapshots.TryGetLatest(roomId, out var header));
+        var replayed = new GameRoom(roomId, new MoveRightGame(), new FakeSimulationClock(), new SeededRandomSource(seed: 1));
+        replayed.RestoreFrom(header); // re-seeds from the captured header, not the construction seed
+        foreach (var recovered in events.Read(roomId))
+        {
+            Assert.True(replayed.ApplyRecoveredEvent(recovered));
+        }
+
+        var replayedX = MoveRightGame.DecodeX(replayed.Project().Single().Payload);
+        Assert.Equal(originalX, replayedX);
+        Assert.Equal(7, header.Seed); // the header carried the original room's seed
+    }
+
     /// <summary>Records applied commands; accepts a single legal command. No real state.</summary>
     private sealed class FakeGame : IGameSimulation
     {
         private readonly string _legal;
+        private readonly int _schemaVersion;
         private readonly HashSet<PlayerId> _players = new();
 
-        public FakeGame(string legal = "Go") => _legal = legal;
+        public FakeGame(string legal = "Go", int schemaVersion = 1)
+        {
+            _legal = legal;
+            _schemaVersion = schemaVersion;
+        }
+
+        public int SchemaVersion => _schemaVersion;
 
         public List<(PlayerId Player, string Command)> Applied { get; } = new();
 

@@ -13,6 +13,7 @@
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
     <PackageReference Include="Microsoft.AspNetCore.Mvc.Testing" Version="10.0.8" />
     <PackageReference Include="Testcontainers.Redis" Version="4.12.0" />
+    <PackageReference Include="Testcontainers.PostgreSql" Version="4.12.0" />
     <PackageReference Include="xunit" Version="2.9.3" />
     <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" />
     <PackageReference Include="Xunit.SkippableFact" Version="1.5.61" />
@@ -40,6 +41,7 @@
     <ProjectReference Include="..\..\src\GameServer.Routing\GameServer.Routing.csproj" />
     <ProjectReference Include="..\..\src\GameServer.Simulation\GameServer.Simulation.csproj" />
     <ProjectReference Include="..\..\src\GameServer.Persistence\GameServer.Persistence.csproj" />
+    <ProjectReference Include="..\..\src\GameServer.Persistence.Postgres\GameServer.Persistence.Postgres.csproj" />
     <ProjectReference Include="..\..\src\GameServer.Observability\GameServer.Observability.csproj" />
     <ProjectReference Include="..\..\src\GameServer.ControlPlane\GameServer.ControlPlane.csproj" />
     <ProjectReference Include="..\..\src\GameServer.Replication\GameServer.Replication.csproj" />

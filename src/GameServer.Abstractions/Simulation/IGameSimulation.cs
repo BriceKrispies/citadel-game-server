@@ -69,6 +69,14 @@ public interface IGameSimulation
     /// <summary>Projects current authoritative state into the generic replication model.</summary>
     IReadOnlyList<EntitySnapshot> Project();
 
+    /// <summary>
+    /// The version of this game's serialized-state layout. Captured into a room snapshot so a
+    /// restore can detect a snapshot produced by an incompatible game build rather than silently
+    /// mis-deserializing it. Default is 1; a game bumps it when it changes its <see cref="Serialize"/>
+    /// format. Default interface member, so existing games are unaffected (Liskov).
+    /// </summary>
+    int SchemaVersion => 1;
+
     /// <summary>Serializes all authoritative state into an opaque durable snapshot.</summary>
     byte[] Serialize();
 

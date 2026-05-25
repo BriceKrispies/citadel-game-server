@@ -7,6 +7,7 @@ using GameServer.Host;
 using GameServer.Identity;
 using GameServer.Observability;
 using GameServer.Persistence;
+using GameServer.Persistence.Postgres;
 using GameServer.Protocol;
 using GameServer.Protocol.Realtime;
 using GameServer.Replication;
@@ -62,9 +63,54 @@ builder.Services.AddSingleton<ITenantResolver>(_ => new InMemoryTenantResolver(n
     new TenantContext(new TenantId("tenant-a"), "Tenant A"),
     new TenantContext(new TenantId("tenant-b"), "Tenant B"),
 }));
-builder.Services.AddSingleton<ISnapshotStore<RoomKey, RoomSnapshot>>(_ => new InMemorySnapshotStore<RoomKey, RoomSnapshot>());
-// The tick selector lets the log compact events folded into a snapshot (see retention below).
-builder.Services.AddSingleton<IEventLog<RoomKey, RoomEvent>>(_ => new InMemoryEventLog<RoomKey, RoomEvent>(e => e.Tick));
+// Durable persistence backend is config-selected, exactly like the cluster directory: in-memory for
+// dev / a single throwaway node (state dies with the process), Postgres for a durable, multi-tenant
+// deployment — both behind the SAME rank-0 ISnapshotStore / IEventLog ports, so the recovery path is
+// unchanged. Postgres is DATABASE-PER-TENANT: a room's key projects to (tenant, room) and the tenant
+// part selects that tenant's own database via the connection resolver, so a write can never land in a
+// shared table another tenant could read.
+if (string.Equals(builder.Configuration["Persistence:Backend"], "Postgres", StringComparison.OrdinalIgnoreCase))
+{
+    // Per-tenant connection map (Persistence:Postgres:Tenants:<tenantId> = connection string). An
+    // unmapped tenant FAILS rather than falling back to a shared database (see the resolver).
+    var tenantConnections = builder.Configuration.GetSection("Persistence:Postgres:Tenants")
+        .GetChildren()
+        .ToDictionary(c => c.Key, c => c.Value
+            ?? throw new InvalidOperationException($"Persistence:Postgres:Tenants:{c.Key} has no connection string."));
+    if (tenantConnections.Count == 0)
+    {
+        throw new InvalidOperationException(
+            "Persistence:Backend=Postgres requires at least one per-tenant connection under " +
+            "Persistence:Postgres:Tenants. Refusing to start a durable host with no tenant database mapping.");
+    }
+
+    builder.Services.AddSingleton<ITenantConnectionResolver>(new DictionaryTenantConnectionResolver(tenantConnections));
+    builder.Services.AddSingleton<ITenantDbContextFactory>(sp =>
+        new TenantDbContextFactory(sp.GetRequiredService<ITenantConnectionResolver>()));
+
+    // Project the rank-2 RoomKey into the adapter's tenant-scoped DurableRoomKey at the composition
+    // root (the only place that knows both types). This keeps the Postgres adapter free of RoomKey.
+    static DurableRoomKey KeyOf(RoomKey key) => new(key.TenantId.Value, key.RoomId.Value);
+
+    builder.Services.AddSingleton<ISnapshotStore<RoomKey, RoomSnapshot>>(sp =>
+        new PostgresSnapshotStore<RoomKey>(sp.GetRequiredService<ITenantDbContextFactory>(), KeyOf));
+    builder.Services.AddSingleton<IEventLog<RoomKey, RoomEvent>>(sp =>
+        new PostgresEventLog<RoomKey>(sp.GetRequiredService<ITenantDbContextFactory>(), KeyOf));
+
+    // Bring each mapped tenant's schema up to date on startup (idempotent), so the node is ready to
+    // persist immediately. Migration is applied once per tenant database.
+    var contexts = new TenantDbContextFactory(new DictionaryTenantConnectionResolver(tenantConnections));
+    foreach (var tenantId in tenantConnections.Keys)
+    {
+        contexts.Migrate(tenantId);
+    }
+}
+else
+{
+    builder.Services.AddSingleton<ISnapshotStore<RoomKey, RoomSnapshot>>(_ => new InMemorySnapshotStore<RoomKey, RoomSnapshot>());
+    // The tick selector lets the log compact events folded into a snapshot (see retention below).
+    builder.Services.AddSingleton<IEventLog<RoomKey, RoomEvent>>(_ => new InMemoryEventLog<RoomKey, RoomEvent>(e => e.Tick));
+}
 builder.Services.AddSingleton<ISessionRouter>(_ => new InMemorySessionRouter(
     (roomId, gameId) => new GameRoom(roomId, GameFor(gameId), new LogicalSimulationClock(), new SeededRandomSource())));
 // Admission ceilings are enforced at the edge so a burst sheds cleanly instead of driving the
@@ -517,6 +563,58 @@ api.MapGet("/admin/rooms/{tenantId}/{roomId}", (HttpContext ctx, string tenantId
 
     Audit(ctx, "admin-observe-room", $"{tenantId}/{roomId}", audit, clock);
     return Results.Ok(observation);
+});
+
+// Read-only REPLAY: rebuild a room's authoritative state from its DURABLE snapshot + post-snapshot
+// event log and return the projected entity state, WITHOUT registering a live room or mutating
+// anything. This is the operator's "what state would this room recover to" view — the same recovery
+// path a restarted node uses, exposed for diagnostics. Authenticated (group filter), tenant-authorized
+// (Forbid), and audited. Strictly read-only: it never goes through (or around) the authoritative
+// pathway, so it cannot be a backdoor to mutate game state.
+api.MapGet("/admin/rooms/{tenantId}/{roomId}/replay",
+    (HttpContext ctx, string tenantId, string roomId, string? gameId,
+        ISnapshotStore<RoomKey, RoomSnapshot> snapshots, IEventLog<RoomKey, RoomEvent> events,
+        ITelemetrySink telemetry, IAuditLog audit, IClock clock) =>
+{
+    if (Forbid(ctx, tenantId, "admin-replay-room", $"{tenantId}/{roomId}", audit, clock) is { } denied)
+    {
+        return denied;
+    }
+
+    var key = new RoomKey(new TenantId(tenantId), new RoomId(roomId));
+
+    // Recovery reads ONLY this key's tenant/room data, so it can never observe another tenant's
+    // snapshot or events. The game to replay under is supplied by the operator (?gameId=), defaulting
+    // to the platform's default game; GameFor selects the matching deterministic simulation.
+    if (!snapshots.TryGetLatest(key, out var checkpoint))
+    {
+        return Results.NotFound(new ApiError("NoCheckpoint", $"Room '{tenantId}/{roomId}' has no durable snapshot to replay."));
+    }
+
+    var recovery = new RoomRecoveryService(
+        snapshots, events,
+        (rid, gid) => new GameRoom(rid, GameFor(gid), new LogicalSimulationClock(), new SeededRandomSource()),
+        telemetry);
+
+    var result = recovery.Restore(key, new GameId(gameId ?? "demo"), MissingSnapshotPolicy.Fail);
+    if (result.Outcome != RoomRecoveryOutcome.RestoredFromSnapshot || result.Room is null)
+    {
+        return Results.Json(
+            new ApiError("ReplayFailed", "The room could not be replayed from its durable artifacts (corrupt or incompatible recovery data)."),
+            statusCode: StatusCodes.Status422UnprocessableEntity);
+    }
+
+    Audit(ctx, "admin-replay-room", $"{tenantId}/{roomId}", audit, clock);
+    return Results.Ok(new
+    {
+        tenantId,
+        roomId,
+        restoredTick = result.RestoredTick,
+        replayedEventCount = result.ReplayedEventCount,
+        seed = checkpoint.Seed,
+        gameSchemaVersion = checkpoint.GameSchemaVersion,
+        entities = result.Room.Project().Select(e => new { id = e.Id.Value, version = e.Version }),
+    });
 });
 
 // Live "drop in" stream: a read-only SSE feed of the room observation, ~4 Hz, until the

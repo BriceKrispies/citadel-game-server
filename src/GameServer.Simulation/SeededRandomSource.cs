@@ -8,12 +8,24 @@ namespace GameServer.Simulation;
 public sealed class SeededRandomSource : IRandomSource
 {
 #pragma warning disable CA5394 // Deterministic seeding is intentional: this is simulation randomness, not security.
-    private readonly Random _random;
+    private Random _random;
 
-    public SeededRandomSource(int seed = 1) => _random = new Random(seed);
+    public SeededRandomSource(int seed = 1)
+    {
+        Seed = seed;
+        _random = new Random(seed);
+    }
+
+    public int Seed { get; private set; }
 
     public int Next(int maxExclusive) => _random.Next(maxExclusive);
 
     public double NextDouble() => _random.NextDouble();
+
+    public void Reseed(int seed)
+    {
+        Seed = seed;
+        _random = new Random(seed);
+    }
 #pragma warning restore CA5394
 }

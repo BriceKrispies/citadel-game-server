@@ -9,6 +9,7 @@
     <Project Path="src/GameServer.Tenancy/GameServer.Tenancy.csproj" />
     <Project Path="src/GameServer.Identity/GameServer.Identity.csproj" />
     <Project Path="src/GameServer.Persistence/GameServer.Persistence.csproj" />
+    <Project Path="src/GameServer.Persistence.Postgres/GameServer.Persistence.Postgres.csproj" />
     <Project Path="src/GameServer.Observability/GameServer.Observability.csproj" />
     <Project Path="src/GameServer.ControlPlane/GameServer.ControlPlane.csproj" />
   </Folder>
