@@ -1,0 +1,43 @@
+# Container build context excludes. Keep the context small and free of build
+# artifacts and secrets. NOTE: co-located *.Tests.cs under src/ are intentionally
+# NOT excluded — the repo analyzer (CITADEL0001) consumes them as AdditionalFiles
+# during the Host build (see src/Directory.Build.targets). The separate top-level
+# tests/ project IS excluded; it is not part of the Host publish.
+
+# Build artifacts (any depth)
+**/bin/
+**/obj/
+**/.vs/
+artifacts/
+StrykerOutput/
+
+# Test + load projects not needed to publish the Host
+tests/
+load/
+
+# VCS, planning, and docs that don't affect the build
+.git/
+.gitignore
+.github/
+.claude/
+.config/
+tickets/
+
+# Exclude docs/specs under contracts/, but KEEP the .proto sources — the Protocol
+# project compiles contracts/realtime/proto/*.proto at build time.
+contracts/**
+!contracts/realtime/proto/**
+
+# Logs and local scratch
+*.log
+host.log
+
+# Top-level markdown / planning files
+*.md
+Citadel.slnx
+stryker-config.json
+
+# The container tooling itself
+Containerfile
+.containerignore
+scripts/

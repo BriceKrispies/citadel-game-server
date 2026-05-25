@@ -18,7 +18,18 @@ using Microsoft.Extensions.DependencyInjection;
 using StackExchange.Redis;
 
 var builder = WebApplication.CreateBuilder(args);
-builder.WebHost.UseUrls("http://localhost:5000");
+// Bind address: honor the standard ASP.NET Core env vars when present (e.g. in-container the
+// runtime image sets ASPNETCORE_HTTP_PORTS=8080 so Kestrel binds 0.0.0.0:8080). Calling
+// UseUrls unconditionally would HARD-OVERRIDE those env vars and pin the host to localhost:5000,
+// which cannot be reached from outside a container. So we only fall back to the local-dev default
+// when neither ASPNETCORE_URLS nor ASPNETCORE_HTTP_PORTS is configured.
+if (string.IsNullOrEmpty(builder.Configuration["ASPNETCORE_URLS"])
+    && string.IsNullOrEmpty(builder.Configuration["urls"])
+    && string.IsNullOrEmpty(builder.Configuration["ASPNETCORE_HTTP_PORTS"])
+    && string.IsNullOrEmpty(builder.Configuration["http_ports"]))
+{
+    builder.WebHost.UseUrls("http://localhost:5000");
+}
 
 // ---- Cluster identity (used by the realtime kernel and the clustering services below) -------
 // NodeId is this node's externally-reachable base address, so an affinity redirect can carry it
