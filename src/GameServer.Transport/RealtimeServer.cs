@@ -357,7 +357,25 @@ public sealed class RealtimeServer
     {
         _telemetry.Increment(TelemetryMetrics.ConnectionsClosed);
 
-        if (_lifecycle != RoomLifecycle.Reap || connection.RoomKey is not { } key)
+        if (connection.RoomKey is not { } key)
+        {
+            return;
+        }
+
+        // A disconnect while joined is a leave: signal the game so it can release the player's
+        // state, regardless of the room lifecycle policy. The game owns the mutation; the room
+        // lock serializes it against tick/join. Idempotent for a player already removed.
+        if (connection.Player is { } leaving && _router.TryGetRoom(key, out var liveRoom))
+        {
+            lock (liveRoom)
+            {
+                liveRoom.Leave(leaving);
+            }
+
+            _telemetry.Event(TelemetryEvents.RoomLeft, Tags(("roomId", key.RoomId.Value), ("playerId", leaving.Value)));
+        }
+
+        if (_lifecycle != RoomLifecycle.Reap)
         {
             return;
         }
@@ -386,6 +404,13 @@ public sealed class RealtimeServer
                 _subscribers.TryRemove(key, out _);
                 _replicators.TryRemove(key, out _);
                 _roomLocks.TryRemove(key, out _);
+                // The room is being torn down (last subscriber left): signal the game once so it
+                // can finalize, before the routed room is dropped.
+                if (_router.TryGetRoom(key, out var reapedRoom))
+                {
+                    reapedRoom.Terminate();
+                }
+
                 _router.TryRemoveRoom(key);
                 // Relinquish cluster ownership as the room goes away, so OwnedCount tracks live rooms
                 // and another node can take this room later. No-op when clustering is not wired.
@@ -544,14 +569,40 @@ public sealed class RealtimeServer
             // under delta/interest/budget even when message count stays flat.
             _telemetry.Measure(TelemetryMetrics.SnapshotEntities, entities.Count);
 
-            // Hand the snapshot to the connection's outbound buffer; this never awaits the
-            // socket, so one slow client cannot stall the tick for everyone in the room. The
-            // delta baseline still advances only on ack (see HandleAckAsync), never on a send.
-            var envelope = connection.BuildSnapshot(tick, entities, traceId);
+            // Snapshot vs delta selection: a baseline-less (just-joined/reset) viewer gets a full
+            // ServerSnapshot keyframe it can replace its view with; once it holds a baseline, it
+            // gets a ServerDelta carrying only the changed/removed entities since its last ack.
+            // The replicator decides keyframe-ness per viewer (see ReplicationMessage.IsKeyframe).
+            // Hand the message to the connection's outbound buffer; this never awaits the socket,
+            // so one slow client cannot stall the tick for everyone. The delta baseline still
+            // advances only on ack (see HandleAckAsync), never on a send.
+            MessageEnvelope envelope;
+            string outType;
+            if (message.IsKeyframe)
+            {
+                envelope = connection.BuildSnapshot(tick, entities, traceId);
+                outType = nameof(MessageType.ServerSnapshot);
+            }
+            else
+            {
+                var removed = new List<string>(message.Removed.Count);
+                foreach (var id in message.Removed)
+                {
+                    removed.Add(id.Value);
+                }
+
+                // A delta is taken against the viewer's acknowledged baseline tick — the last tick
+                // the client confirmed. The client applies `changed`/`removed` on top of the state
+                // it acked at `from` to reconstruct the full state at `to`.
+                var fromTick = replicator.AcknowledgedTick(message.Viewer);
+                envelope = connection.BuildDelta(fromTick, tick, entities, removed, traceId);
+                outType = nameof(MessageType.ServerDelta);
+            }
+
             switch (connection.Outbound.TryEnqueue(envelope))
             {
                 case OutboundEnqueueResult.Enqueued:
-                    _telemetry.Increment(TelemetryMetrics.MessagesOut, Tags(("messageType", nameof(MessageType.ServerSnapshot))));
+                    _telemetry.Increment(TelemetryMetrics.MessagesOut, Tags(("messageType", outType)));
                     break;
                 case OutboundEnqueueResult.DroppedQueueFull:
                     // The client is too far behind to keep up; shed this snapshot rather than
@@ -585,6 +636,9 @@ public sealed class RealtimeServer
                 break;
             case MessageType.ClientJoinRoom:
                 await HandleJoinAsync(connection, inbound, cancellationToken).ConfigureAwait(false);
+                break;
+            case MessageType.ClientLeaveRoom:
+                await HandleLeaveAsync(connection, inbound, cancellationToken).ConfigureAwait(false);
                 break;
             case MessageType.ClientCommand:
                 await HandleCommandAsync(connection, inbound, cancellationToken).ConfigureAwait(false);
@@ -688,6 +742,9 @@ public sealed class RealtimeServer
         // join that would create a NEW room beyond the room ceiling is shed here.
         var admitted = false;
         var rejectReason = "max_rooms";
+        // The game refused the join via its CanJoin rule (capacity/ban/phase). Distinct from a
+        // platform capacity shed: it gets a definitive NotJoined error, not a retryable Overloaded.
+        var gameRefused = false;
         lock (RoomLock(key))
         {
             var isNewRoom = !_subscribers.ContainsKey(key);
@@ -706,19 +763,50 @@ public sealed class RealtimeServer
             else
             {
                 var room = _router.GetOrCreateRoom(session.Tenant, join.RoomId, gameId);
+
+                // The game's own admission rule runs before any membership is granted. A refusal
+                // leaves NO membership, NO subscriber, NO replicator. If the room was created just
+                // now solely for this join, tear it back down so a refused join cannot leak a room.
+                bool canJoin;
                 lock (room)
                 {
-                    room.Join(player);
+                    canJoin = room.CanJoin(player);
+                    if (canJoin)
+                    {
+                        room.Join(player);
+                    }
                 }
 
-                _subscribers.GetOrAdd(key, _ => new ConcurrentDictionary<ConnectionId, Connection>())[connection.Id] = connection;
-                var replicator = _replicators.GetOrAdd(key, _ => new Replicator(_policyProvider(gameId)));
-                // A (re)joining connection cannot be assumed to hold any prior baseline: reset
-                // it so the next tick re-establishes a full keyframe for this viewer.
-                replicator.Resubscribe(new ViewerId(connection.Id.Value));
-                connection.JoinRoom(key, player);
-                admitted = true;
+                if (!canJoin)
+                {
+                    gameRefused = true;
+                    if (isNewRoom)
+                    {
+                        room.Terminate();
+                        _router.TryRemoveRoom(key);
+                    }
+                }
+                else
+                {
+                    _subscribers.GetOrAdd(key, _ => new ConcurrentDictionary<ConnectionId, Connection>())[connection.Id] = connection;
+                    var replicator = _replicators.GetOrAdd(key, _ => new Replicator(_policyProvider(gameId)));
+                    // A (re)joining connection cannot be assumed to hold any prior baseline: reset
+                    // it so the next tick re-establishes a full keyframe for this viewer.
+                    replicator.Resubscribe(new ViewerId(connection.Id.Value));
+                    connection.JoinRoom(key, player);
+                    admitted = true;
+                }
             }
+        }
+
+        if (gameRefused)
+        {
+            // A definitive refusal by the game's rules (not retryable platform backpressure).
+            _telemetry.Event(TelemetryEvents.CommandRejected, Tags(
+                ("code", ServerErrorCode.NotJoined.ToString()), ("roomId", join.RoomId.Value), ("playerId", player.Value)));
+            await RejectAsync(connection, inbound, ServerErrorCode.NotJoined,
+                "The game refused this join.", cancellationToken).ConfigureAwait(false);
+            return;
         }
 
         if (!admitted)
@@ -730,6 +818,86 @@ public sealed class RealtimeServer
         }
 
         _telemetry.Event(TelemetryEvents.RoomJoined, Tags(("roomId", join.RoomId.Value), ("playerId", player.Value)));
+
+        // Announce the join to the room as a discrete platform event. Emitted to this connection
+        // so a just-joined client gets an immediate, observable lifecycle signal.
+        await EmitEventAsync(connection, ServerEvent.Types.PlayerJoined, player, inbound.TraceId, cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Sends a discrete <see cref="ServerEvent"/> to a connection (player joined/left, room
+    /// terminating). The payload is the UTF-8 player id, so a client can attribute the event.
+    /// Best-effort and non-blocking via the outbound buffer; lifecycle signalling must never
+    /// stall the caller.
+    /// </summary>
+    private Task EmitEventAsync(Connection connection, string eventType, PlayerId player, string traceId, CancellationToken cancellationToken)
+    {
+        var payload = System.Text.Encoding.UTF8.GetBytes(player.Value);
+        var envelope = connection.BuildServerMessage(MessageType.ServerEvent, new ServerEvent(eventType, payload), traceId);
+        connection.Outbound.TryEnqueue(envelope);
+        _telemetry.Increment(TelemetryMetrics.MessagesOut, Tags(("messageType", nameof(MessageType.ServerEvent))));
+        return Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// Handles a <see cref="MessageType.ClientLeaveRoom"/>: removes the player from its room,
+    /// fires the game's <c>OnLeave</c>, drops the viewer's replication baseline, and emits a
+    /// <see cref="ServerEvent"/> — all WITHOUT closing the connection (the client may rejoin).
+    /// Under <see cref="RoomLifecycle.Reap"/> a now-empty room is torn down (with
+    /// <c>OnTerminate</c>), exactly as a disconnect of the last subscriber would.
+    /// </summary>
+    private async Task HandleLeaveAsync(Connection connection, MessageEnvelope inbound, CancellationToken cancellationToken)
+    {
+        if (connection.RoomKey is not { } key || connection.Player is not { } player)
+        {
+            await RejectAsync(connection, inbound, ServerErrorCode.NotJoined, "Not in a room.", cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        lock (RoomLock(key))
+        {
+            if (_router.TryGetRoom(key, out var room))
+            {
+                lock (room)
+                {
+                    room.Leave(player);
+                }
+            }
+
+            if (_subscribers.TryGetValue(key, out var connections))
+            {
+                connections.TryRemove(connection.Id, out _);
+
+                if (_replicators.TryGetValue(key, out var replicator))
+                {
+                    replicator.Resubscribe(new ViewerId(connection.Id.Value));
+                }
+
+                // Reap a room emptied by an explicit leave, same as a last-subscriber disconnect.
+                if (_lifecycle == RoomLifecycle.Reap && connections.IsEmpty)
+                {
+                    _subscribers.TryRemove(key, out _);
+                    _replicators.TryRemove(key, out _);
+                    if (_router.TryGetRoom(key, out var reapedRoom))
+                    {
+                        reapedRoom.Terminate();
+                    }
+
+                    _router.TryRemoveRoom(key);
+                    _roomDirectory?.Release(key, _localNode);
+                    _telemetry.Event(TelemetryEvents.RoomClosed, Tags(("roomId", key.RoomId.Value), ("tenantId", key.TenantId.Value)));
+                }
+            }
+        }
+
+        _telemetry.Event(TelemetryEvents.RoomLeft, Tags(("roomId", key.RoomId.Value), ("playerId", player.Value)));
+
+        // Tell the (still-connected) client its leave took effect, while the connection still
+        // carries the room/player context on the envelope, then clear membership.
+        await EmitEventAsync(connection, ServerEvent.Types.PlayerLeft, player, inbound.TraceId, cancellationToken)
+            .ConfigureAwait(false);
+        connection.LeaveRoom();
     }
 
     private async Task HandleCommandAsync(Connection connection, MessageEnvelope inbound, CancellationToken cancellationToken)
@@ -906,6 +1074,13 @@ public sealed class RealtimeServer
             Player = player;
         }
 
+        /// <summary>Clears room membership after an explicit leave; the connection stays open and may rejoin.</summary>
+        public void LeaveRoom()
+        {
+            RoomKey = null;
+            Player = null;
+        }
+
         public MessageEnvelope BuildServerMessage(MessageType type, IMessagePayload payload, string traceId) =>
             new()
             {
@@ -939,6 +1114,28 @@ public sealed class RealtimeServer
                 Sequence = Interlocked.Increment(ref _outboundSequence),
                 TraceId = traceId,
                 Payload = new ServerSnapshot(tick, entities),
+            };
+
+        /// <summary>
+        /// Builds one <see cref="ServerDelta"/> envelope: the entities that changed (and the
+        /// ids that left this viewer's view) between the viewer's acknowledged baseline tick
+        /// <paramref name="fromTick"/> and <paramref name="toTick"/>. The client applies it on
+        /// top of the state it acked at <paramref name="fromTick"/>.
+        /// </summary>
+        public MessageEnvelope BuildDelta(
+            long fromTick, long toTick, IReadOnlyList<EntityState> changed, IReadOnlyList<string> removed, string traceId) =>
+            new()
+            {
+                TenantId = TenantId ?? new TenantId("unknown"),
+                GameId = Game ?? new GameId("unknown"),
+                RoomId = RoomKey?.RoomId,
+                SessionId = Session?.Id,
+                PlayerId = Player,
+                ProtocolVersion = ProtocolVersions.Current,
+                MessageType = MessageType.ServerDelta,
+                Sequence = Interlocked.Increment(ref _outboundSequence),
+                TraceId = traceId,
+                Payload = new ServerDelta(fromTick, toTick, changed, removed),
             };
     }
 }

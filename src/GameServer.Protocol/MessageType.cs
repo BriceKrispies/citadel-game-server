@@ -11,9 +11,13 @@ public enum MessageType
     ClientJoinRoom,
     ClientCommand,
     ClientAck,
+    ClientLeaveRoom,
 
     // Server -> Client
     ServerWelcome,
     ServerSnapshot,
+    ServerDelta,
+    ServerCorrection,
+    ServerEvent,
     ServerError,
 }

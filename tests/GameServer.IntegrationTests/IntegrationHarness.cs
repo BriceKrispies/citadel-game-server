@@ -95,6 +95,26 @@ public sealed class IntegrationHarness
     }
 
     /// <summary>
+    /// Connects, performs hello + join, then sends an explicit <c>ClientLeaveRoom</c> before
+    /// closing — exercising the leave-without-disconnect path (membership freed, <c>OnLeave</c>
+    /// fired, a <c>ServerEvent</c> emitted). Returns the transport so a scenario can read pushes.
+    /// </summary>
+    public async Task<InMemoryBidirectionalTransport> RunClientWithLeaveAsync(
+        string tenant, string room, string player, string game = "demo")
+    {
+        var transport = new InMemoryBidirectionalTransport(new ConnectionId($"{tenant}:{room}:{player}:{Guid.NewGuid():n}"));
+        transport.ClientSend(Envelope(MessageType.ClientHello, new ClientHello(player), tenant, game, room: null, player, sequence: 0));
+        transport.ClientSend(Envelope(MessageType.ClientJoinRoom, new ClientJoinRoom(new RoomId(room)), tenant, game, room, player, sequence: 0));
+        transport.ClientSend(Envelope(MessageType.ClientLeaveRoom, new ClientLeaveRoom(new RoomId(room)), tenant, game, room, player, sequence: 0));
+        transport.CompleteClient();
+
+        var claims = new JoinTokenClaims(
+            tenant, game, room, player, DateTimeOffset.UnixEpoch, DateTimeOffset.UnixEpoch.AddHours(1));
+        await Server.HandleConnectionAsync(transport, claims);
+        return transport;
+    }
+
+    /// <summary>
     /// Opens a connection and leaves it open (the loop parks awaiting more input). Because
     /// admission runs synchronously before the first await, the returned connection has
     /// already been admitted-or-rejected by the time this returns. Call

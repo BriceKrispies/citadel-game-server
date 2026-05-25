@@ -53,6 +53,9 @@ enum MessageType {
   MESSAGE_TYPE_SERVER_PONG = 13;
   MESSAGE_TYPE_SERVER_ERROR = 14;
   MESSAGE_TYPE_GAME_MESSAGE = 15;
+  // Wave 2 (additive): client asks to leave its current room without dropping the
+  // connection. Frees room membership and fires the game's OnLeave hook.
+  MESSAGE_TYPE_CLIENT_LEAVE_ROOM = 16;
 }
 
 // Stable error codes. See contracts/realtime/ERRORS.md.
@@ -128,6 +131,8 @@ message RealtimeEnvelope {
     ServerPong server_pong = 32;
     ServerError server_error = 33;
     GameMessage game_message = 34;
+    // Wave 2 (additive oneof case): a new field number, never reusing 20-34.
+    ClientLeaveRoom client_leave_room = 35;
   }
 }
 
@@ -149,6 +154,12 @@ message ClientHello {
 }
 
 message ClientJoinRoom {
+  string room_id = 1;
+}
+
+// Request to leave the current room without closing the connection. The server frees
+// the player's membership, fires the game's OnLeave hook, and emits a ServerEvent.
+message ClientLeaveRoom {
   string room_id = 1;
 }
 
@@ -215,13 +226,25 @@ message EntityState {
 message ServerDelta {
   uint64 from_server_tick = 1;
   uint64 to_server_tick = 2;
+  // Legacy typed player view (v1.0). Superseded by `changed_entities`: game state is now
+  // opaque to the platform. Field number kept reserved per COMPATIBILITY.md (never
+  // reused/renumbered); no longer populated by the server.
   repeated PlayerState changed = 3;
+  // Wave 2 (additive): game-defined entities that changed since `from_server_tick`. The
+  // platform never interprets `payload`; the client decodes per its game's schema.
+  repeated EntityState changed_entities = 4;
+  // Entity ids that left this viewer's view since `from_server_tick` (despawn/out-of-interest).
+  repeated string removed_entities = 5;
 }
 
 message ServerCorrection {
   uint64 server_tick = 1;
+  // Legacy typed player view (v1.0). Superseded by `authoritative_entity`. Field number kept
+  // reserved per COMPATIBILITY.md; no longer populated by the server.
   PlayerState authoritative = 2;
   uint64 acked_client_tick = 3;
+  // Wave 2 (additive): the authoritative, opaque game entity the client must reconcile to.
+  EntityState authoritative_entity = 4;
 }
 
 message ServerEvent {

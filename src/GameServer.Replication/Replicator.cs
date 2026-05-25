@@ -5,7 +5,24 @@ namespace GameServer.Replication;
 /// are a full snapshot or a delta. Exactly one message is produced per viewer
 /// (batching), regardless of how many entities it contains.
 /// </summary>
-public sealed record ReplicationMessage(ViewerId Viewer, SnapshotMode Mode, IReadOnlyList<EntitySnapshot> Entities);
+/// <remarks>
+/// <see cref="IsKeyframe"/> distinguishes a full-replace frame (the recipient clears and
+/// replaces its view) from an incremental one (merge + apply <see cref="Removed"/>). In
+/// <see cref="SnapshotMode.Full"/> every message is a keyframe; in
+/// <see cref="SnapshotMode.Delta"/> only a baseline-less viewer's first/reset frame is.
+/// This is what lets the wire send a <c>ServerSnapshot</c> for the keyframe and a
+/// <c>ServerDelta</c> thereafter.
+/// </remarks>
+public sealed record ReplicationMessage(
+    ViewerId Viewer,
+    SnapshotMode Mode,
+    IReadOnlyList<EntitySnapshot> Entities,
+    bool IsKeyframe = true,
+    IReadOnlyList<EntityId>? Removed = null)
+{
+    /// <summary>Entity ids that left this viewer's view since its baseline (incremental frames only).</summary>
+    public IReadOnlyList<EntityId> Removed { get; init; } = Removed ?? Array.Empty<EntityId>();
+}
 
 /// <summary>
 /// The replication pipeline. For each viewer it applies the policy's interest filter,
@@ -46,10 +63,22 @@ public sealed class Replicator
             // 1) Interest: only entities relevant to this viewer.
             var relevant = _interest.Relevant(viewer, world);
 
-            // 2) Delta: in Delta mode, only what changed since the viewer's acknowledged baseline.
-            var candidates = _policy.SnapshotMode == SnapshotMode.Delta
-                ? _delta.Compute(viewer.Id, relevant, tick)
-                : relevant;
+            // 2) Delta: in Delta mode, only what changed since the viewer's acknowledged baseline,
+            //    plus whether this is a keyframe (full replace) and which entities were removed.
+            IReadOnlyList<EntitySnapshot> candidates;
+            var isKeyframe = true;
+            IReadOnlyList<EntityId> removed = Array.Empty<EntityId>();
+            if (_policy.SnapshotMode == SnapshotMode.Delta)
+            {
+                var result = _delta.ComputeDelta(viewer.Id, relevant, tick);
+                candidates = result.Changed;
+                isKeyframe = result.IsKeyframe;
+                removed = result.Removed;
+            }
+            else
+            {
+                candidates = relevant;
+            }
 
             // 3) Budget: if configured, cap bytes/tick by priority (deferred entities escalate).
             IReadOnlyList<EntitySnapshot> entities;
@@ -77,7 +106,7 @@ public sealed class Replicator
                 entities = candidates;
             }
 
-            messages.Add(new ReplicationMessage(viewer.Id, _policy.SnapshotMode, entities));
+            messages.Add(new ReplicationMessage(viewer.Id, _policy.SnapshotMode, entities, isKeyframe, removed));
         }
 
         return messages;
@@ -101,4 +130,10 @@ public sealed class Replicator
     /// for observability (0 = caught up; a climbing value means the client has stopped acking).
     /// </summary>
     public int PendingSnapshots(ViewerId viewer) => _delta.PendingSnapshotCount(viewer);
+
+    /// <summary>
+    /// The tick of the viewer's acknowledged baseline — the <c>from_server_tick</c> a delta
+    /// references. -1 until the viewer has acked anything (then the next frame is a keyframe).
+    /// </summary>
+    public long AcknowledgedTick(ViewerId viewer) => _delta.AcknowledgedTick(viewer);
 }

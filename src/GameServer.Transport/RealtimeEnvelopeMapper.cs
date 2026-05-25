@@ -51,6 +51,10 @@ public sealed class RealtimeEnvelopeMapper
                 return RealtimeClientMessage.Forward(
                     ToKernel(env, K.MessageType.ClientJoinRoom, new K.ClientJoinRoom(new K.RoomId(env.ClientJoinRoom.RoomId))));
 
+            case RealtimeEnvelope.PayloadOneofCase.ClientLeaveRoom:
+                return RealtimeClientMessage.Forward(
+                    ToKernel(env, K.MessageType.ClientLeaveRoom, new K.ClientLeaveRoom(new K.RoomId(env.ClientLeaveRoom.RoomId))));
+
             case RealtimeEnvelope.PayloadOneofCase.ClientCommand:
                 // Commands are game-defined strings; the room's game validates them.
                 // The platform forwards the raw command unchanged.
@@ -122,6 +126,55 @@ public sealed class RealtimeEnvelopeMapper
                 }
 
                 wire.ServerSnapshot = serverSnapshot;
+                break;
+
+            case K.ServerDelta delta:
+                wire.MessageType = MessageType.ServerDelta;
+                wire.ServerTick = (ulong)delta.ToTick;
+                var serverDelta = new ServerDelta
+                {
+                    FromServerTick = (ulong)delta.FromTick,
+                    ToServerTick = (ulong)delta.ToTick,
+                };
+                foreach (var entity in delta.Changed)
+                {
+                    serverDelta.ChangedEntities.Add(new EntityState
+                    {
+                        EntityId = entity.EntityId,
+                        Payload = Google.Protobuf.ByteString.CopyFrom(entity.Payload),
+                    });
+                }
+
+                foreach (var removed in delta.Removed)
+                {
+                    serverDelta.RemovedEntities.Add(removed);
+                }
+
+                wire.ServerDelta = serverDelta;
+                break;
+
+            case K.ServerCorrection correction:
+                wire.MessageType = MessageType.ServerCorrection;
+                wire.ServerTick = (ulong)correction.Tick;
+                wire.ServerCorrection = new ServerCorrection
+                {
+                    ServerTick = (ulong)correction.Tick,
+                    AckedClientTick = (ulong)correction.AckedClientTick,
+                    AuthoritativeEntity = new EntityState
+                    {
+                        EntityId = correction.Authoritative.EntityId,
+                        Payload = Google.Protobuf.ByteString.CopyFrom(correction.Authoritative.Payload),
+                    },
+                };
+                break;
+
+            case K.ServerEvent serverEvent:
+                wire.MessageType = MessageType.ServerEvent;
+                wire.ServerEvent = new ServerEvent
+                {
+                    EventType = serverEvent.EventType,
+                    Payload = Google.Protobuf.ByteString.CopyFrom(serverEvent.Payload),
+                };
                 break;
 
             case K.ServerError error:

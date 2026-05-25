@@ -57,8 +57,23 @@ state is conveyed by `ServerSnapshot`, `ServerDelta`, and `ServerCorrection`.
 - Clients may locally predict using `ClientInputFrame` (carrying `client_tick`).
 - The server simulates authoritatively and emits `ServerSnapshot`/`ServerDelta`.
 - When a client's predicted state diverges, the server emits a `ServerCorrection`
-  carrying the authoritative state and the `acked_client_tick` it reflects; the
+  carrying the authoritative entity and the `acked_client_tick` it reflects; the
   client must reconcile to it.
+
+### `ClientInputFrame` is accepted but not yet simulated (intentional, v1)
+
+The server currently **accepts `ClientInputFrame` but does not fold it into the
+authoritative simulation** — it is acknowledged at the edge and dropped, not enqueued as
+a command. The authoritative command path is `ClientCommand` (a validated, sequenced
+intent the room's game applies on tick). **Load and gameplay must drive `ClientCommand`,
+not `ClientInputFrame`** — an input frame does not advance state and does not count as a
+command, so a client sending only input frames will appear idle.
+
+This is a documented, deliberate limitation, not a silent drop: predicted-input batching
+(folding `ClientInputFrame.commands` into the room queue with client-tick reconciliation)
+is a planned addition. Until then the contract is explicit so clients are not surprised.
+An input frame still proves connection liveness at the transport (a received frame), so it
+does not trip the idle reaper.
 
 ## Logical channel multiplexing
 
@@ -68,10 +83,61 @@ default; other channels may be throttled or shed independently under load.
 
 ## Snapshot vs delta
 
-- `ServerSnapshot` is a full authoritative state for a tick.
-- `ServerDelta` carries only what changed between `from_server_tick` and
-  `to_server_tick`. Clients must be able to apply both; deltas reference a prior
-  snapshot/tick.
+- `ServerSnapshot` is a full authoritative **keyframe**: the complete relevant entity
+  set for a tick. The client **replaces** its view with it.
+- `ServerDelta` is **incremental**: `changed_entities` (fields the client merges) and
+  `removed_entities` (entity ids the client deletes) between `from_server_tick` and
+  `to_server_tick`. The client **applies it on top of the baseline it acked at**
+  `from_server_tick`.
+- Selection (server-side): a viewer with no acknowledged baseline (just joined, or
+  reset on reconnect) gets a full `ServerSnapshot` keyframe; once it has acked a tick,
+  subsequent ticks are sent as `ServerDelta`. The delta baseline advances **only on a
+  `ClientAck`**, never because a write to the socket succeeded — so a dropped frame
+  self-heals (the server keeps resending until the client confirms).
+- A client that receives a `ServerDelta` whose `from_server_tick` does not match its
+  last applied tick is missing the baseline: it should NOT ack, which makes the server
+  resend until it catches up (or, on reconnect, a fresh keyframe is sent).
+- The opaque entity model supersedes the legacy typed `PlayerState` views on
+  `ServerSnapshot.players` / `ServerDelta.changed` / `ServerCorrection.authoritative`
+  (fields kept reserved for back-compat, no longer populated). Game state travels as
+  opaque `EntityState.payload` bytes the platform never interprets.
+
+## Room lifecycle
+
+- **Join** (`ClientJoinRoom`): the platform validates identity/capacity, then the
+  room's game decides admission via its `CanJoin` rule. A game refusal yields a typed
+  `ServerError` (`PLAYER_NOT_IN_ROOM` on the wire) and grants no membership. On success
+  the server emits a `ServerEvent` (`player_joined`).
+- **Leave** (`ClientLeaveRoom`): frees the player's room membership **without dropping
+  the connection** (the client may rejoin), fires the game's `OnLeave`, and emits a
+  `ServerEvent` (`player_left`). A disconnect also fires `OnLeave`.
+- **Terminate**: when a room's last member leaves (under the host's reap lifecycle) the
+  room is torn down and the game's `OnTerminate` fires once. Lifecycle hooks have no-op
+  defaults, so a game that ignores them behaves identically (Liskov).
+
+## listRooms (deferred)
+
+There is **no client-facing room-discovery message** in v1, by design. Room placement is
+authoritative and tenant-scoped: a client connects with a join token already minted by
+the control plane for a specific `(tenant, game, room, player)`, so a client never needs
+to enumerate rooms. Room listing/discovery is an **operator/admin concern** served by the
+control-plane HTTP API (and the in-process `TryObserveRoom` admin view), not the realtime
+data plane. Adding a realtime `listRooms` would put a control-plane query on the hot path
+and risk leaking other tenants' rooms; it is deferred unless a concrete spectator/lobby
+use case requires it, at which point it ships as an additive message on the `ADMIN` or
+`SPECTATOR` channel.
+
+## Reconnect / resume
+
+Reconnect is supported as a **fresh keyframe**, not stateful session resume. A
+reconnecting client re-runs hello → join under the same identity; the server resets that
+viewer's delta baseline (`Resubscribe`), so the next tick re-establishes a full
+`ServerSnapshot` keyframe and the client rebuilds its view from scratch. This is the
+correct, robust behavior: a reconnected client cannot be assumed to still hold any state a
+previous connection acknowledged. **Stateful resume** (replaying the exact unacked frame
+window across a new connection to avoid a full keyframe) is **deferred** — it is a
+bandwidth optimization, not a correctness requirement, and the keyframe path already
+reconstructs identical state (proven by the reconnect reconstruction tests).
 
 ## Ping / pong
 

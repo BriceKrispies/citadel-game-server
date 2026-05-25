@@ -44,6 +44,23 @@ public sealed class RealtimeServerDeltaAckTests
     private static ServerSnapshot SoleSnapshot(FakeClient client) =>
         client.Received().Select(m => m.Payload).OfType<ServerSnapshot>().Single();
 
+    // The latest authoritative-state message on the wire, snapshot OR delta, and whether it
+    // carried the player's entity. After the viewer holds an acked baseline, the wire sends a
+    // ServerDelta (not a ServerSnapshot) carrying only what changed; a baseline-less viewer gets
+    // a full ServerSnapshot keyframe.
+    private static bool LatestStateContainsPlayer(FakeClient client)
+    {
+        var last = client.Received()
+            .Select(m => m.Payload)
+            .Last(p => p is ServerSnapshot or ServerDelta);
+        return last switch
+        {
+            ServerSnapshot s => s.Entities.Any(e => e.EntityId == Player.Value),
+            ServerDelta d => d.Changed.Any(e => e.EntityId == Player.Value),
+            _ => false,
+        };
+    }
+
     [Fact]
     public async Task UnackedSnapshot_IsResentOnNextTick()
     {
@@ -57,17 +74,16 @@ public sealed class RealtimeServerDeltaAckTests
         client.Close();
         await server.HandleConnectionAsync(transport, client.Principal);
 
-        // Tick 1: the keyframe. The write succeeds (the in-memory transport always
-        // accepts), but the client sends no ClientAck.
+        // Tick 1: the keyframe (a full ServerSnapshot, since the viewer has no baseline). The
+        // write succeeds (the in-memory transport always accepts), but the client sends no ClientAck.
         await server.TickRoom(key);
         Assert.True(ContainsPlayer(SoleSnapshot(client)), "first tick should carry the player (keyframe)");
 
-        // Tick 2: still no ack and the world is unchanged. Because the client never
-        // confirmed receipt, the server must resend the player's state rather than
-        // assume it landed. RED today: send-success was treated as an ack, so the
-        // baseline advanced and this snapshot is empty.
+        // Tick 2: still no ack and the world is unchanged. Because the client never confirmed
+        // receipt, the viewer still holds no baseline, so the server resends a full keyframe rather
+        // than assume the first landed.
         await server.TickRoom(key);
-        Assert.True(ContainsPlayer(SoleSnapshot(client)), "unacked state must be resent until the client acks");
+        Assert.True(LatestStateContainsPlayer(client), "unacked state must be resent until the client acks");
     }
 
     [Fact]
@@ -86,7 +102,7 @@ public sealed class RealtimeServerDeltaAckTests
         client.Join(Arena);
         var loop = server.HandleConnectionAsync(transport, client.Principal);
 
-        // Tick 1: keyframe carrying the player.
+        // Tick 1: keyframe (ServerSnapshot) carrying the player.
         await server.TickRoom(key);
         Assert.True(ContainsPlayer(SoleSnapshot(client)), "first tick should carry the player (keyframe)");
 
@@ -97,11 +113,11 @@ public sealed class RealtimeServerDeltaAckTests
         client.Close();
         await loop;
 
-        // Tick 2: the world is unchanged and the client has acked the only state it
-        // holds, so there is nothing new to send. A degenerate "never advance the
-        // baseline" fix would resend the player here and fail this assertion.
+        // Tick 2: the world is unchanged and the client has acked the only state it holds, so the
+        // ServerDelta carries nothing new. A degenerate "never advance the baseline" fix would
+        // resend the player here and fail this assertion.
         await server.TickRoom(key);
-        Assert.False(ContainsPlayer(SoleSnapshot(client)), "acked, unchanged state must not be resent");
+        Assert.False(LatestStateContainsPlayer(client), "acked, unchanged state must not be resent");
     }
 
     [Fact]
@@ -129,8 +145,14 @@ public sealed class RealtimeServerDeltaAckTests
         await server.TickRoom(key);
         await server.TickRoom(key);
 
-        var snapshots = client.Received().Select(m => m.Payload).OfType<ServerSnapshot>().ToList();
-        Assert.True(ContainsPlayer(snapshots[0]), "first tick should carry the player (keyframe)");
-        Assert.All(snapshots.Skip(1), s => Assert.False(ContainsPlayer(s), "post-ack ticks must not resend a persisted baseline"));
+        // The single keyframe (tick 1, before the baseline existed) carries the player; every
+        // post-ack tick is a ServerDelta, and none may resend the persisted baseline.
+        // (Drain once: Received() consumes the outbound buffer.)
+        var received = client.Received().Select(m => m.Payload).ToList();
+        var snapshots = received.OfType<ServerSnapshot>().ToList();
+        var deltas = received.OfType<ServerDelta>().ToList();
+        Assert.True(ContainsPlayer(Assert.Single(snapshots)), "first tick should carry the player (keyframe)");
+        Assert.NotEmpty(deltas);
+        Assert.All(deltas, d => Assert.DoesNotContain(d.Changed, e => e.EntityId == Player.Value));
     }
 }

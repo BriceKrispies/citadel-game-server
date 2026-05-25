@@ -62,9 +62,14 @@ public sealed class JsonMessageCodec : IMessageCodec
         {
             MessageType.ClientHello => Deserialize<ClientHello>(payloadNode),
             MessageType.ClientJoinRoom => Deserialize<ClientJoinRoom>(payloadNode),
+            MessageType.ClientLeaveRoom => Deserialize<ClientLeaveRoom>(payloadNode),
             MessageType.ClientCommand => Deserialize<ClientCommand>(payloadNode),
+            MessageType.ClientAck => Deserialize<ClientAck>(payloadNode),
             MessageType.ServerWelcome => Deserialize<ServerWelcome>(payloadNode),
             MessageType.ServerSnapshot => Deserialize<ServerSnapshot>(payloadNode),
+            MessageType.ServerDelta => Deserialize<ServerDelta>(payloadNode),
+            MessageType.ServerCorrection => Deserialize<ServerCorrection>(payloadNode),
+            MessageType.ServerEvent => Deserialize<ServerEvent>(payloadNode),
             MessageType.ServerError => Deserialize<ServerError>(payloadNode),
             _ => throw new MessageCodecException($"Unknown message type '{messageType}'."),
         };

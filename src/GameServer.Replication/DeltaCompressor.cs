@@ -1,6 +1,16 @@
 namespace GameServer.Replication;
 
 /// <summary>
+/// The per-viewer delta for a tick: the changed/new entities, the ids that left the
+/// viewer's relevant set (removals), and whether it is a keyframe (full replace) versus
+/// an incremental update (merge) — the distinction a client needs to apply it correctly.
+/// </summary>
+public sealed record DeltaResult(
+    IReadOnlyList<EntitySnapshot> Changed,
+    IReadOnlyList<EntityId> Removed,
+    bool IsKeyframe);
+
+/// <summary>
 /// Per-viewer delta compression against an acknowledged baseline (the Quake/Source
 /// model). <see cref="Compute"/> returns only entities that are new or whose version
 /// differs from the viewer's acknowledged baseline, and records the full set it sent
@@ -28,6 +38,9 @@ public sealed class DeltaCompressor
 
     // What each viewer has confirmed it holds.
     private readonly Dictionary<ViewerId, Dictionary<EntityId, long>> _baseline = new();
+    // The tick at which each viewer's baseline was committed (the last tick it acked). A
+    // delta's `from` references this so the client knows the baseline the delta builds on.
+    private readonly Dictionary<ViewerId, long> _baselineTick = new();
     // Snapshots sent but not yet acknowledged, keyed (ascending) by the tick they were
     // computed for, so an ack can commit exactly the state the client confirmed rather
     // than whatever the most recent tick happens to hold.
@@ -50,11 +63,25 @@ public sealed class DeltaCompressor
     }
 
     /// <summary>Returns the entities new/changed since this viewer's acknowledged baseline.</summary>
-    public IReadOnlyList<EntitySnapshot> Compute(ViewerId viewer, IReadOnlyList<EntitySnapshot> relevant, long tick)
+    public IReadOnlyList<EntitySnapshot> Compute(ViewerId viewer, IReadOnlyList<EntitySnapshot> relevant, long tick) =>
+        ComputeDelta(viewer, relevant, tick).Changed;
+
+    /// <summary>
+    /// Computes the per-viewer delta against its acknowledged baseline: the changed entities,
+    /// the ids that left the viewer's relevant set since the baseline (removals), and whether
+    /// this is a keyframe (the viewer held no baseline, so the changed set is the full relevant
+    /// set and a client must replace rather than merge). Records the relevant set for a later ack.
+    /// </summary>
+    public DeltaResult ComputeDelta(ViewerId viewer, IReadOnlyList<EntitySnapshot> relevant, long tick)
     {
         lock (_lock)
         {
             _baseline.TryGetValue(viewer, out var baseline);
+
+            // A viewer with no acknowledged baseline gets a keyframe: the full relevant set,
+            // which a client replaces its view with (not a merge). Once it has acked anything,
+            // subsequent frames are incremental.
+            var isKeyframe = baseline is null || baseline.Count == 0;
 
             var changed = new List<EntitySnapshot>();
             foreach (var entity in relevant)
@@ -63,6 +90,27 @@ public sealed class DeltaCompressor
                 if (baseline is null || !baseline.TryGetValue(entity.Id, out var ackedVersion) || ackedVersion != entity.Version)
                 {
                     changed.Add(entity);
+                }
+            }
+
+            // Removals: entities the viewer had in its acknowledged baseline that are no longer
+            // relevant (despawned, or moved out of interest). Only meaningful for an incremental
+            // frame — a keyframe replaces the whole view, so it carries no separate removal list.
+            var removed = new List<EntityId>();
+            if (!isKeyframe && baseline is not null)
+            {
+                var present = new HashSet<EntityId>(relevant.Count);
+                foreach (var entity in relevant)
+                {
+                    present.Add(entity.Id);
+                }
+
+                foreach (var id in baseline.Keys)
+                {
+                    if (!present.Contains(id))
+                    {
+                        removed.Add(id);
+                    }
                 }
             }
 
@@ -85,7 +133,7 @@ public sealed class DeltaCompressor
                 byTick.Remove(byTick.Keys.First());
             }
 
-            return changed;
+            return new DeltaResult(changed, removed, isKeyframe);
         }
     }
 
@@ -120,6 +168,7 @@ public sealed class DeltaCompressor
             }
 
             _baseline[viewer] = new Dictionary<EntityId, long>(byTick[commitTick.Value]);
+            _baselineTick[viewer] = commitTick.Value;
 
             foreach (var tick in byTick.Keys.Where(t => t <= commitTick.Value).ToList())
             {
@@ -139,7 +188,21 @@ public sealed class DeltaCompressor
         lock (_lock)
         {
             _baseline.Remove(viewer);
+            _baselineTick.Remove(viewer);
             _pending.Remove(viewer);
+        }
+    }
+
+    /// <summary>
+    /// The tick of the viewer's current acknowledged baseline — the <c>from</c> a delta is
+    /// computed against. Returns -1 before the viewer has acknowledged anything (no baseline),
+    /// in which case the next frame is a keyframe rather than a delta.
+    /// </summary>
+    public long AcknowledgedTick(ViewerId viewer)
+    {
+        lock (_lock)
+        {
+            return _baselineTick.TryGetValue(viewer, out var tick) ? tick : -1;
         }
     }
 

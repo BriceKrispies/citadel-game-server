@@ -65,7 +65,13 @@ public sealed class InMemorySessionRouterTests
 
         public int QueueDepth => 0;
 
+        public bool CanJoin(PlayerId player) => true;
+
         public void Join(PlayerId player) { }
+
+        public void Leave(PlayerId player) { }
+
+        public void Terminate() { }
 
         public bool HasPlayer(PlayerId player) => false;
 

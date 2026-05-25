@@ -15,8 +15,32 @@ public sealed class MoveRightGame : IGameSimulation
     public const string MoveRight = "MoveRight";
 
     private readonly Dictionary<PlayerId, int> _x = new();
+    private readonly List<PlayerId> _left = new();
+
+    /// <summary>
+    /// Optional per-room player capacity. 0 = unbounded (the original behavior, so existing
+    /// callers are unaffected). When set, <see cref="CanJoin"/> refuses a join that would
+    /// exceed it — a sample game enforcing its own admission rule (distinct from the platform's).
+    /// </summary>
+    public int MaxPlayers { get; init; }
+
+    /// <summary>Players the game observed leaving, in order — proof a game can react to <c>OnLeave</c>.</summary>
+    public IReadOnlyList<PlayerId> LeftPlayers => _left;
+
+    /// <summary>True once the game observed the room terminating — proof a game can react to <c>OnTerminate</c>.</summary>
+    public bool Terminated { get; private set; }
+
+    public bool CanJoin(PlayerId player) =>
+        MaxPlayers <= 0 || _x.ContainsKey(player) || _x.Count < MaxPlayers;
 
     public void Join(PlayerId player) => _x.TryAdd(player, 0);
+
+    // The reference game records the leave (so a test/observer can see the hook fire) but keeps
+    // the player's authoritative position, so a reconnect resumes where it left off. Whether to
+    // discard a leaver's state is a per-game decision; the platform never forces it.
+    public void OnLeave(PlayerId player) => _left.Add(player);
+
+    public void OnTerminate() => Terminated = true;
 
     public bool HasPlayer(PlayerId player) => _x.ContainsKey(player);
 

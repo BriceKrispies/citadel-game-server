@@ -91,7 +91,10 @@ public sealed class RoomIpcTests
     {
         public RoomId Id => new("arena");
         public int QueueDepth => 0;
+        public bool CanJoin(PlayerId player) => true;
         public void Join(PlayerId player) { }
+        public void Leave(PlayerId player) { }
+        public void Terminate() { }
         public bool HasPlayer(PlayerId player) => false;
         public CommandAdmission TryEnqueue(PlayerId player, string command, long sequence) => CommandAdmission.Accepted;
         public TickResult Tick() => throw new InvalidOperationException("simulated room failure");

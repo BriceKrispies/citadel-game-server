@@ -20,8 +20,27 @@ public interface IGameRoom
     /// </summary>
     int QueueDepth { get; }
 
+    /// <summary>
+    /// Whether the room's game will accept <paramref name="player"/> right now. The data
+    /// plane calls this before <see cref="Join"/>; a false result rejects the join. Defers
+    /// to the game's <c>CanJoin</c> rule (default permissive).
+    /// </summary>
+    bool CanJoin(PlayerId player);
+
     /// <summary>Admits a player to the room's game. Idempotent for an already-joined player.</summary>
     void Join(PlayerId player);
+
+    /// <summary>
+    /// Notifies the room's game that <paramref name="player"/> has left (clean leave or
+    /// disconnect), so it can release that player's state. Forwards to the game's <c>OnLeave</c>.
+    /// </summary>
+    void Leave(PlayerId player);
+
+    /// <summary>
+    /// Signals the room's game that the room is being torn down (reap/shutdown), so it can
+    /// finalize. Called once as the room is removed. Forwards to the game's <c>OnTerminate</c>.
+    /// </summary>
+    void Terminate();
 
     bool HasPlayer(PlayerId player);
 

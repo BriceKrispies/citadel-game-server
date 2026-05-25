@@ -18,8 +18,39 @@ namespace GameServer.Simulation;
 /// </remarks>
 public interface IGameSimulation
 {
+    /// <summary>
+    /// Whether <paramref name="player"/> may join the room right now. The host calls this
+    /// before <see cref="Join"/>; a <c>false</c> result rejects the join with a typed
+    /// <c>ServerError</c> and the player is never admitted (no membership, no state).
+    /// </summary>
+    /// <remarks>
+    /// Default is permissive (always allow), so a game that does not gate joins behaves
+    /// exactly as before (Liskov). A game implements this to enforce its own capacity,
+    /// ban list, lobby-phase, or team-balance rules — never the platform's (those run
+    /// earlier, at the edge).
+    /// </remarks>
+    bool CanJoin(PlayerId player) => true;
+
     /// <summary>Initializes state for a newly joined player. Idempotent.</summary>
     void Join(PlayerId player);
+
+    /// <summary>
+    /// Notifies the game that <paramref name="player"/> has left the room (clean leave or
+    /// disconnect). The game may release that player's authoritative state. Default is a
+    /// no-op so a game that does not care about leaves behaves exactly as before.
+    /// </summary>
+    void OnLeave(PlayerId player)
+    {
+    }
+
+    /// <summary>
+    /// The server→game signal that the room is being torn down (reaped after its last
+    /// player left, or shut down). The game may flush/finalize. Called once; after it the
+    /// game instance is discarded. Default is a no-op (Liskov: existing games unaffected).
+    /// </summary>
+    void OnTerminate()
+    {
+    }
 
     /// <summary>True once the player has been admitted via <see cref="Join"/>.</summary>
     bool HasPlayer(PlayerId player);

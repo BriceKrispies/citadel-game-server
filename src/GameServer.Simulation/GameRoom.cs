@@ -49,7 +49,13 @@ public sealed class GameRoom : IGameRoom
     /// <summary>Commands currently queued for the next tick. A backpressure gauge for the tick driver.</summary>
     public int QueueDepth => _pending.Count;
 
+    public bool CanJoin(PlayerId player) => _game.CanJoin(player);
+
     public void Join(PlayerId player) => _game.Join(player);
+
+    public void Leave(PlayerId player) => _game.OnLeave(player);
+
+    public void Terminate() => _game.OnTerminate();
 
     public bool HasPlayer(PlayerId player) => _game.HasPlayer(player);
 

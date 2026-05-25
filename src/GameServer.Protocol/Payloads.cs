@@ -41,6 +41,16 @@ public sealed record ClientJoinRoom(RoomId RoomId) : IMessagePayload
 }
 
 /// <summary>
+/// Request to leave the current room without dropping the connection. The server frees
+/// the player's membership, signals the game (<c>OnLeave</c>), and emits a
+/// <see cref="ServerEvent"/>. The connection stays open and may rejoin.
+/// </summary>
+public sealed record ClientLeaveRoom(RoomId RoomId) : IMessagePayload
+{
+    public MessageType Type => MessageType.ClientLeaveRoom;
+}
+
+/// <summary>
 /// An intent (not a truth claim) to mutate room state on a future tick. The command
 /// is a game-defined string; the room's game validates and interprets it.
 /// </summary>
@@ -83,6 +93,50 @@ public sealed record EntityState(string EntityId, byte[] Payload);
 public sealed record ServerSnapshot(long Tick, IReadOnlyList<EntityState> Entities) : IMessagePayload
 {
     public MessageType Type => MessageType.ServerSnapshot;
+}
+
+/// <summary>
+/// An incremental update: the entities that changed for this client between
+/// <see cref="FromTick"/> and <see cref="ToTick"/>, plus the ids that left its view.
+/// A client applies it on top of the baseline it acknowledged at <see cref="FromTick"/>
+/// to reconstruct the full state at <see cref="ToTick"/>. The platform never interprets
+/// the entity payloads.
+/// </summary>
+public sealed record ServerDelta(
+    long FromTick,
+    long ToTick,
+    IReadOnlyList<EntityState> Changed,
+    IReadOnlyList<string> Removed) : IMessagePayload
+{
+    public MessageType Type => MessageType.ServerDelta;
+}
+
+/// <summary>
+/// An authoritative correction the client must reconcile to: the platform owns truth, so
+/// when a client's prediction diverges the server sends the authoritative entity at
+/// <see cref="Tick"/>, reflecting input acknowledged through <see cref="AckedClientTick"/>.
+/// </summary>
+public sealed record ServerCorrection(long Tick, EntityState Authoritative, long AckedClientTick) : IMessagePayload
+{
+    public MessageType Type => MessageType.ServerCorrection;
+}
+
+/// <summary>
+/// A discrete room notification (player joined/left, room terminating, …). The
+/// <see cref="EventType"/> is a stable string; <see cref="Payload"/> is opaque
+/// game/platform bytes the recipient decodes by type.
+/// </summary>
+public sealed record ServerEvent(string EventType, byte[] Payload) : IMessagePayload
+{
+    public MessageType Type => MessageType.ServerEvent;
+
+    /// <summary>Stable event-type names the platform itself emits (lifecycle).</summary>
+    public static class Types
+    {
+        public const string PlayerJoined = "player_joined";
+        public const string PlayerLeft = "player_left";
+        public const string RoomTerminated = "room_terminated";
+    }
 }
 
 /// <summary>A typed, traceable rejection. Always correlated to the offending command via the envelope.</summary>

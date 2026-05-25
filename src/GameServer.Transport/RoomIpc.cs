@@ -38,7 +38,10 @@ public interface IRoomRpcChannel : IDisposable
 internal enum RoomRpcOp
 {
     QueueDepth,
+    CanJoin,
     Join,
+    Leave,
+    Terminate,
     HasPlayer,
     TryEnqueue,
     Tick,
@@ -131,7 +134,13 @@ public sealed class RemoteGameRoom : IGameRoom, IDisposable
 
     public int QueueDepth => Call(new RoomRpcRequest(RoomRpcOp.QueueDepth)).Count ?? 0;
 
+    public bool CanJoin(PlayerId player) => Call(new RoomRpcRequest(RoomRpcOp.CanJoin, Player: player.Value)).Flag ?? false;
+
     public void Join(PlayerId player) => Call(new RoomRpcRequest(RoomRpcOp.Join, Player: player.Value));
+
+    public void Leave(PlayerId player) => Call(new RoomRpcRequest(RoomRpcOp.Leave, Player: player.Value));
+
+    public void Terminate() => Call(new RoomRpcRequest(RoomRpcOp.Terminate));
 
     public bool HasPlayer(PlayerId player) => Call(new RoomRpcRequest(RoomRpcOp.HasPlayer, Player: player.Value)).Flag ?? false;
 
@@ -227,7 +236,10 @@ public sealed class RoomHost
     private RoomRpcResponse Dispatch(RoomRpcRequest r) => r.Op switch
     {
         RoomRpcOp.QueueDepth => new RoomRpcResponse(Count: _room.QueueDepth),
+        RoomRpcOp.CanJoin => new RoomRpcResponse(Flag: _room.CanJoin(new PlayerId(Require(r.Player, "player")))),
         RoomRpcOp.Join => Ack(() => _room.Join(new PlayerId(Require(r.Player, "player")))),
+        RoomRpcOp.Leave => Ack(() => _room.Leave(new PlayerId(Require(r.Player, "player")))),
+        RoomRpcOp.Terminate => Ack(() => _room.Terminate()),
         RoomRpcOp.HasPlayer => new RoomRpcResponse(Flag: _room.HasPlayer(new PlayerId(Require(r.Player, "player")))),
         RoomRpcOp.TryEnqueue => new RoomRpcResponse(
             Admission: _room.TryEnqueue(new PlayerId(Require(r.Player, "player")), Require(r.Command, "command"), r.Sequence).ToString()),
