@@ -27,6 +27,7 @@
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/GameServer.IntegrationTests/GameServer.IntegrationTests.csproj" />
+    <Project Path="tests/GameServer.SecurityTests/GameServer.SecurityTests.csproj" />
     <Project Path="tests/GameServer.Tests/GameServer.Tests.csproj" />
   </Folder>
   <Folder Name="/tools/RepoAnalyzers/">
