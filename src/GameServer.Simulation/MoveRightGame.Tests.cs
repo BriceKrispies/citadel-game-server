@@ -51,7 +51,8 @@ public sealed class MoveRightGameTests
         var game = new MoveRightGame();
         game.Join(Player);
 
-        Assert.Throws<ArgumentException>(() => game.Apply(Player, "Nope"));
+        var ex = Assert.Throws<ArgumentException>(() => game.Apply(Player, "Nope"));
+        Assert.Contains("Nope", ex.Message); // the error names the offending command (operability)
     }
 
     [Fact]
@@ -62,6 +63,15 @@ public sealed class MoveRightGameTests
         game.Apply(Player, "MoveRight");
 
         Assert.Equal(1, game.Project().Single().Key.X);
+    }
+
+    [Fact]
+    public void Project_RelevanceKeyGroupIsEmpty()
+    {
+        var game = new MoveRightGame();
+        game.Join(Player);
+
+        Assert.Equal(string.Empty, game.Project().Single().Key.Group);
     }
 
     [Fact]
@@ -77,5 +87,31 @@ public sealed class MoveRightGameTests
 
         Assert.True(restored.HasPlayer(Player));
         Assert.Equal(2, X(restored));
+    }
+
+    [Fact]
+    public void Restore_ReplacesPriorState_RatherThanMergingIntoIt()
+    {
+        // Restore must clear existing positions first: a reused game must not retain a player the
+        // restored snapshot does not contain.
+        var game = new MoveRightGame();
+        game.Join(new PlayerId("stale"));
+
+        var source = new MoveRightGame();
+        source.Join(Player);
+        game.Restore(source.Serialize());
+
+        Assert.True(game.HasPlayer(Player));
+        Assert.False(game.HasPlayer(new PlayerId("stale")));
+    }
+
+    [Fact]
+    public void Restore_FromJsonNull_YieldsEmptyState_WithoutThrowing()
+    {
+        var game = new MoveRightGame();
+
+        game.Restore(System.Text.Encoding.UTF8.GetBytes("null"));
+
+        Assert.Empty(game.Project());
     }
 }

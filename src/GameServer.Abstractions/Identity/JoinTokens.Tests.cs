@@ -36,4 +36,14 @@ public sealed class JoinTokensTests
     {
         Assert.Equal(Claims(), Claims());
     }
+
+    [Fact]
+    public void IsOk_RequiresBothOkStatusAndClaims_NotEither()
+    {
+        // Both halves of IsOk are load-bearing (it is && not ||): a degenerate Ok-with-no-claims
+        // is NOT ok (the edge would otherwise grant a connection with no authorized identity), and
+        // a non-Ok status with claims present is NOT ok either.
+        Assert.False(new TokenVerification(TokenVerificationStatus.Ok, null).IsOk);
+        Assert.False(new TokenVerification(TokenVerificationStatus.Expired, Claims()).IsOk);
+    }
 }

@@ -475,7 +475,8 @@ Tests are physically co-located with the production files they test. Beside Thin
 Analyzer Rule (CITADEL0001)
 
 - The analyzer (tools/RepoAnalyzers/Citadel.RepoAnalyzers) enforces that production .cs files have a co-located test (Name + requiredTestSuffix, default Name.Tests.cs). It is wired into every production build as a non-fatal warning.
-- Ignored categories must be explicit in repo-analyzers.json (ignoredPathGlobs, ignoredFileSuffixes, ignoredGeneratedFiles, requiredTestSuffix). The ignore system is open-ended: add categories in the config, not in code.
+- Ignored categories must be explicit in repo-analyzers.json (ignoredPathGlobs, ignoredFileSuffixes, ignoredGeneratedFiles, ignoreDeclarationOnlyFiles, requiredTestSuffix). The ignore system is open-ended: add categories in the config, not in code.
+- ignoreDeclarationOnlyFiles (on): a file declaring no executable behavior — zero statements: pure interfaces, enums, DTO/value records, const vocabularies, no-op null objects, expression-bodied accessors — has nothing to unit-test, so it does not require a co-located test. Any statement body (control flow, mutation, multi-step method) keeps the requirement in force. Composition roots (Host/RoomWorkerHost/LoadHarness) and a short, rationale-documented per-file allowlist (integration/cross-process-only logic) are excluded via ignoredPathGlobs.
 
 Layered Architecture (CITADEL0002 / CITADEL0003)
 

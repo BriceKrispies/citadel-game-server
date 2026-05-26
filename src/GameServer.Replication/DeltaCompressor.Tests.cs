@@ -166,6 +166,43 @@ public sealed class DeltaCompressorTests
     }
 
     [Fact]
+    public void Ctor_RetentionOfOne_IsValid_AndCapsAtOne()
+    {
+        // 1 is the smallest LEGAL window (the bound is "< 1", not "<= 1"): it must be accepted and
+        // must cap the unacked backlog at exactly one snapshot.
+        var delta = new DeltaCompressor(maxUnackedSnapshots: 1);
+        var viewer = new ViewerId("v");
+
+        delta.Compute(viewer, new[] { Entity("a", 1) }, tick: 1);
+        delta.Compute(viewer, new[] { Entity("a", 1) }, tick: 2);
+
+        Assert.Equal(1, delta.PendingSnapshotCount(viewer));
+    }
+
+    [Fact]
+    public void Ctor_RetentionBelowOne_Throws()
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(() => new DeltaCompressor(maxUnackedSnapshots: 0));
+    }
+
+    [Fact]
+    public void AcknowledgedTick_IsMinusOneUntilAcked_ThenTheConfirmedTick_AndResetsOnForget()
+    {
+        var delta = new DeltaCompressor();
+        var viewer = new ViewerId("v");
+
+        // The sentinel is exactly -1 (a keyframe signal), never a positive tick.
+        Assert.Equal(-1, delta.AcknowledgedTick(viewer));
+
+        delta.Compute(viewer, new[] { Entity("a", 1) }, tick: 5);
+        delta.Acknowledge(viewer, ackedTick: 5);
+        Assert.Equal(5, delta.AcknowledgedTick(viewer)); // now reflects the confirmed baseline tick
+
+        delta.Forget(viewer);
+        Assert.Equal(-1, delta.AcknowledgedTick(viewer)); // Forget clears the baseline tick too
+    }
+
+    [Fact]
     public void Delta_Forget_ResendsFullStateOnNextCompute()
     {
         var delta = new DeltaCompressor();

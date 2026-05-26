@@ -18,6 +18,17 @@ internal sealed class CoLocatedTestConfig
 
     public bool IgnoreGeneratedFiles { get; private set; } = true;
 
+    /// <summary>
+    /// When true, a production file is exempt from the co-located-test requirement if it
+    /// declares no executable behavior — i.e. its syntax tree contains zero statements.
+    /// This covers pure contract files: interfaces, enums, DTO/value records, const
+    /// vocabularies, no-op null objects, and thin wrappers whose members are all
+    /// signatures, fields, constants, auto-properties, or expression-bodied accessors.
+    /// Such files have nothing to unit-test, so demanding a co-located test produces only
+    /// vacuous assertions. Defaults to false so the rule stays strict unless opted in.
+    /// </summary>
+    public bool IgnoreDeclarationOnlyFiles { get; private set; } = false;
+
     public ImmutableArray<string> IgnoredFileSuffixes { get; private set; } = ImmutableArray.Create(
         ".Tests.cs", ".Test.cs", ".Fakes.cs", ".TestData.cs", ".TestDoubles.cs");
 
@@ -49,6 +60,12 @@ internal sealed class CoLocatedTestConfig
         if (generated.HasValue)
         {
             config.IgnoreGeneratedFiles = generated.Value;
+        }
+
+        var declarationOnly = MatchBool(json, "ignoreDeclarationOnlyFiles");
+        if (declarationOnly.HasValue)
+        {
+            config.IgnoreDeclarationOnlyFiles = declarationOnly.Value;
         }
 
         var suffixes = MatchStringArray(json, "ignoredFileSuffixes");

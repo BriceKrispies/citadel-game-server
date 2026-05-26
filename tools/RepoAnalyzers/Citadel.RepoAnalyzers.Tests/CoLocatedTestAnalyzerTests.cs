@@ -124,6 +124,55 @@ public sealed class CoLocatedTestAnalyzerTests
     }
 
     [Fact]
+    public async Task DeclarationOnlyFiles_AreReported_ByDefault()
+    {
+        // The knob defaults off: a pure-contract file with no co-located test still warns.
+        var diagnostics = await new AnalyzerScenario()
+            .Production("/repo/src/Feature/IThing.cs", "interface IThing { int Read(); }")
+            .RunAsync();
+
+        Assert.Single(diagnostics);
+    }
+
+    [Theory]
+    [InlineData("interface IThing { int Read(); }")]                          // pure interface
+    [InlineData("enum Color { Red, Green }")]                                 // enum
+    [InlineData("sealed record Point(int X, int Y);")]                        // DTO/value record
+    [InlineData("static class Names { public const string A = \"a\"; }")]    // const vocabulary
+    [InlineData("sealed record Id(string Value) { public override string ToString() => Value; }")] // expression-bodied accessor
+    [InlineData("sealed class NullSink { public void Emit() { } }")]          // no-op empty body
+    public async Task IgnoreDeclarationOnlyFiles_ExemptsContractFiles_WhenEnabled(string content)
+    {
+        const string config = """
+        { "ignoreDeclarationOnlyFiles": true }
+        """;
+
+        var diagnostics = await new AnalyzerScenario()
+            .Production("/repo/src/Feature/Thing.cs", content)
+            .Config(config)
+            .RunAsync();
+
+        Assert.Empty(diagnostics);
+    }
+
+    [Theory]
+    [InlineData("class Svc { public int Add(int a, int b) { return a + b; } }")] // statement body
+    [InlineData("class Svc { public void Do() { if (true) { } } }")]            // control flow
+    public async Task IgnoreDeclarationOnlyFiles_StillReportsFilesWithStatements_WhenEnabled(string content)
+    {
+        const string config = """
+        { "ignoreDeclarationOnlyFiles": true }
+        """;
+
+        var diagnostics = await new AnalyzerScenario()
+            .Production("/repo/src/Feature/Thing.cs", content)
+            .Config(config)
+            .RunAsync();
+
+        Assert.Single(diagnostics);
+    }
+
+    [Fact]
     public async Task Respects_RequiredTestSuffix_FromConfig()
     {
         const string config = """

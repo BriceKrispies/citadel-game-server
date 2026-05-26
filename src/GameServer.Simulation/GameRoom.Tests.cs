@@ -135,6 +135,38 @@ public sealed class GameRoomTests
     }
 
     [Fact]
+    public void RestoreFrom_DiscardsPendingCommands()
+    {
+        // A restore re-establishes authoritative state at the snapshot tick; any command queued
+        // before the restore is from the abandoned timeline and must NOT apply on the next tick.
+        var game = new FakeGame();
+        var room = NewRoom(game);
+        room.Join(Player);
+        Assert.Equal(CommandAdmission.Accepted, room.TryEnqueue(Player, "Go", 1));
+
+        room.RestoreFrom(new RoomSnapshot(0, game.Serialize()));
+        var result = room.Tick();
+
+        Assert.Empty(game.Applied);   // the pre-restore command was dropped, not replayed
+        Assert.Empty(result.Events);
+    }
+
+    [Fact]
+    public void ApplyRecoveredEvent_ForPlayerNotYetPresent_JoinsThemThenApplies()
+    {
+        // During recovery the event log may carry a command for a player who joined after the
+        // snapshot. The room must admit them before replaying the command, not skip the join.
+        var game = new FakeGame(legal: "Go");
+        var room = NewRoom(game);
+
+        var applied = room.ApplyRecoveredEvent(new RoomEvent(1, Player, "Go"));
+
+        Assert.True(applied);
+        Assert.True(room.HasPlayer(Player)); // the absent player was joined as part of recovery
+        Assert.Single(game.Applied);
+    }
+
+    [Fact]
     public void Snapshot_CapturesReplayHeader_SeedAndSchemaVersion()
     {
         var game = new FakeGame(schemaVersion: 7);

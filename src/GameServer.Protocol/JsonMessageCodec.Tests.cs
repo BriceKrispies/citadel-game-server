@@ -79,6 +79,53 @@ public sealed class JsonMessageCodecTests
          "sequence":1,"payload":{"clientName":"x"}}
         """;
 
+        var ex = Assert.Throws<MessageCodecException>(() => _codec.Decode(wire));
+        Assert.Contains("traceId", ex.Message); // the error names the offending field (operability)
+    }
+
+    [Fact]
+    public void Decode_RejectsMissingRequiredNumberField()
+    {
+        // No protocolVersion (a numeric field): exercises the RequireNumber path, distinct from the
+        // string-field path above. A missing number must surface as a codec error, not a raw NRE.
+        const string wire = """
+        {"tenantId":"t","gameId":"g","messageType":"ClientHello",
+         "sequence":1,"traceId":"x","payload":{"clientName":"x"}}
+        """;
+
+        var ex = Assert.Throws<MessageCodecException>(() => _codec.Decode(wire));
+        Assert.Contains("protocolVersion", ex.Message);
+    }
+
+    [Fact]
+    public void Decode_RejectsWrongCaseMessageType()
+    {
+        // The message type is matched case-SENSITIVELY: "clienthello" is not "ClientHello". A
+        // case-insensitive parse would silently accept a malformed type off the wire.
+        const string wire = """
+        {"tenantId":"t","gameId":"g","protocolVersion":1,"messageType":"clienthello",
+         "sequence":1,"traceId":"x","payload":{"clientName":"x"}}
+        """;
+
         Assert.Throws<MessageCodecException>(() => _codec.Decode(wire));
+    }
+
+    [Fact]
+    public void Encode_RejectsInconsistentEnvelope()
+    {
+        // The declared MessageType must match the payload's type. Encoding a mismatch must fail
+        // fast rather than emit a frame the peer cannot decode.
+        var inconsistent = new MessageEnvelope
+        {
+            TenantId = new TenantId("t"),
+            GameId = new GameId("g"),
+            ProtocolVersion = ProtocolVersions.Current,
+            MessageType = MessageType.ClientCommand,   // declares a command...
+            Sequence = 1,
+            TraceId = "x",
+            Payload = new ClientHello("c"),             // ...but carries a hello
+        };
+
+        Assert.Throws<MessageCodecException>(() => _codec.Encode(inconsistent));
     }
 }

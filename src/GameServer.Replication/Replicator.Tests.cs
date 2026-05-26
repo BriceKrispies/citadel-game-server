@@ -8,6 +8,17 @@ public sealed class ReplicatorTests
         new(new EntityId(id), version, new RelevanceKey(x, 0, ""), new byte[sizeBytes]);
 
     [Fact]
+    public void ReplicationMessage_Removed_DefaultsToEmpty_NotNull()
+    {
+        // Recipients iterate Removed unconditionally; it must never be null when omitted, so the
+        // default coalesces to an empty list rather than leaving the backing field null.
+        var message = new ReplicationMessage(new ViewerId("v"), SnapshotMode.Delta, Array.Empty<EntitySnapshot>());
+
+        Assert.NotNull(message.Removed);
+        Assert.Empty(message.Removed);
+    }
+
+    [Fact]
     public void Replicator_Batches_OneMessagePerViewer_WithAllEntitiesInFullEveryoneMode()
     {
         var replicator = new Replicator(ReplicationPolicy.Default); // Everyone + Full

@@ -1,6 +1,10 @@
 {
   "requiredTestSuffix": ".Tests.cs",
   "ignoredGeneratedFiles": true,
+
+  "//ignoreDeclarationOnlyFiles": "CITADEL0001: a file declaring no executable behavior (zero statements — pure interfaces, enums, DTO/value records, const vocabularies, no-op null objects, expression-bodied accessors) has nothing to unit-test, so it does not require a co-located test. Files with any statement body still do.",
+  "ignoreDeclarationOnlyFiles": true,
+
   "ignoredFileSuffixes": [
     ".Tests.cs",
     ".Test.cs",
@@ -8,11 +12,21 @@
     ".TestData.cs",
     ".TestDoubles.cs"
   ],
+
+  "//ignoredPathGlobs": "Dir patterns: build output, shared test support, EF migrations. Composition roots (Host/RoomWorkerHost/LoadHarness) wire all layers and are validated by the integration/e2e/load suites, not by unit co-location — the same projects the layering rules exempt as compositionRoots. The trailing per-file entries are real logic that is genuinely covered, but only by out-of-process suites: the Redis adapters by the integration suite (RedisRoomDirectoryScenario, real Redis), SystemProcessLauncher by the cross-process worker scenario, and the two transports by their same-folder feature-grouped test files (Transports.Tests.cs / RealtimeServer.*.Tests.cs).",
   "ignoredPathGlobs": [
     "**/bin/**",
     "**/obj/**",
     "**/Testing/**",
-    "**/Migrations/**"
+    "**/Migrations/**",
+    "**/GameServer.Host/**",
+    "**/GameServer.RoomWorkerHost/**",
+    "**/GameServer.LoadHarness/**",
+    "**/GameServer.Cluster.Redis/RedisRoomDirectory.cs",
+    "**/GameServer.Cluster.Redis/RedisRoomPlacement.cs",
+    "**/GameServer.Transport/SystemProcessLauncher.cs",
+    "**/GameServer.Transport/BufferedServerPushTransport.cs",
+    "**/GameServer.Transport/InMemoryBidirectionalTransport.cs"
   ],
 
   "//layering": "CITADEL0002/0003: concentric ring architecture. A project may use symbols only from the universal kernel (rank == universalRank) or the layer exactly one rank inward (strict adjacency). Composition roots wire all layers and are exempt. Any unranked GameServer.* project is an error.",

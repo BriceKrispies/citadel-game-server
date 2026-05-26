@@ -50,6 +50,37 @@ public sealed class SeededRandomSourceTests
     }
 
     [Fact]
+    public void Next_NonPositiveBound_Throws()
+    {
+        var random = new SeededRandomSource(seed: 7);
+
+        // The boundary itself (0) and any negative bound are illegal — not just "< 0".
+        Assert.Throws<ArgumentOutOfRangeException>(() => random.Next(0));
+        Assert.Throws<ArgumentOutOfRangeException>(() => random.Next(-1));
+    }
+
+    [Fact]
+    public void Seed_ProducesAGoldenSequence_PinningTheExactAlgorithm()
+    {
+        // Golden values captured from the SplitMix64 implementation. This is the only test that
+        // pins the EXACT bit-mixing and state advance: same-seed-same-sequence and capture/restore
+        // all stay green even if the algorithm is altered consistently, so without a golden anchor a
+        // changed gamma step or shift/xor still "agrees with itself". These numbers lock the algorithm
+        // (and thus cross-process/replay reproducibility) to one specific, durable sequence.
+        var random = new SeededRandomSource(seed: 123);
+
+        var sequence = new long[8];
+        for (var i = 0; i < sequence.Length; i++)
+        {
+            sequence[i] = random.Next(1_000_000);
+        }
+
+        Assert.Equal(
+            new long[] { 706491, 976596, 859662, 686798, 686085, 667090, 999939, 482356 },
+            sequence);
+    }
+
+    [Fact]
     public void CapturedState_RestoresOntoADifferentSource_YieldingTheSameContinuation()
     {
         // The cross-process replay case: a fresh source (different seed) adopts a captured state and
