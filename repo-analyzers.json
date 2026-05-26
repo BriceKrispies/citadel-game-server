@@ -43,5 +43,46 @@
       "GameServer.RoomWorkerHost",
       "GameServer.LoadHarness"
     ]
+  },
+
+  "//invariants": "CITADEL0004-0013: architectural invariants DERIVED FROM docs/manifest/surface-manifest.json (invariantEvidence). Each rule keys off the symbols the surface trace observed. Symbol identities below mirror the analyzer defaults (single source of truth lives in InvariantConfig); the tuning knobs (assemblies, allowlists, exempt types, requiredTagsByMetric) are what ops adjust.",
+  "invariants": {
+    "//0004": "Simulation purity: no wall-clock / ambient randomness in the kernel assembly.",
+    "simulationAssemblies": ["GameServer.Simulation"],
+    "simulationBannedMembers": [
+      "System.DateTime.Now", "System.DateTime.UtcNow", "System.DateTime.Today",
+      "System.DateTimeOffset.Now", "System.DateTimeOffset.UtcNow",
+      "System.Random.Shared", "System.Guid.NewGuid",
+      "System.Environment.TickCount", "System.Environment.TickCount64",
+      "System.Threading.Thread.Sleep", "System.Threading.Tasks.Task.Delay"
+    ],
+    "simulationBannedTypes": ["System.Diagnostics.Stopwatch"],
+
+    "//0005": "Protocol payloads are immutable sealed records.",
+    "protocolPayloadMarker": "GameServer.Protocol.IMessagePayload",
+
+    "//0006": "Realtime/routing buffers must be bounded; allowlist the in-process test transport.",
+    "boundedQueueAssemblies": ["GameServer.Transport", "GameServer.Routing", "GameServer.Cluster.Redis"],
+    "unboundedChannelAllowlist": ["InMemoryBidirectionalTransport"],
+
+    "//0007": "Room identity carries tenant context; exempt the IPC room proxy (tracked manifest gap ipc-no-tenant-tag).",
+    "tenantScopedAssemblies": ["GameServer.Transport", "GameServer.Routing"],
+    "roomIdType": "RoomId",
+    "tenantParamTypes": ["TenantId", "TenantContext", "RoomKey", "Session"],
+    "tenantContextExemptTypes": ["RemoteGameRoom", "RemoteRoomException"],
+
+    "//0008": "Protocol dispatch must have a default arm.",
+    "dispatchEnum": "GameServer.Protocol.MessageType",
+
+    "//0009": "Room state mutated only by the owner type.",
+    "mutationOwnerType": "GameRoom",
+
+    "//0010": "Telemetry context tags. requiredTagsByMetric is intentionally EMPTY (rule dormant): the trace found untagged hot-path metrics (gap obs-untagged-hotpath); populate 'Metric=tagA,tagB' entries here as those gaps are closed.",
+    "telemetrySink": "GameServer.Observability.ITelemetrySink",
+    "requiredTagsByMetric": [],
+
+    "//0011-0013": "Data-flow provenance: trusted vs untrusted identifier roots.",
+    "trustedTenantSources": ["session", "connection", "principal"],
+    "untrustedInboundNames": ["inbound", "envelope", "message", "wire", "request"]
   }
 }
