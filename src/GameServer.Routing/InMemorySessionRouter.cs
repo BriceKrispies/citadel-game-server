@@ -41,6 +41,18 @@ public sealed class InMemorySessionRouter : ISessionRouter
 
     public bool TryRemoveRoom(RoomKey key) => _rooms.TryRemove(key, out _);
 
+    public bool TryReplaceRoom(RoomKey key, IGameRoom room)
+    {
+        // Only replace a room that is actually placed (a rewind targets a live room). The two-arg
+        // TryGetValue/TryUpdate pattern keeps the swap atomic against concurrent placement.
+        if (!_rooms.TryGetValue(key, out var existing))
+        {
+            return false;
+        }
+
+        return _rooms.TryUpdate(key, room, existing);
+    }
+
     /// <summary>Number of placed rooms. A leak indicator: it should fall as rooms empty out.</summary>
     public int RoomCount => _rooms.Count;
 

@@ -27,3 +27,22 @@ public sealed record RoomObservation(
 {
     public int SubscriberCount => Viewers.Count;
 }
+
+/// <summary>How a live-room rewind terminated. Always explicit and observable.</summary>
+public enum RoomRewindOutcome
+{
+    /// <summary>State was rewound to the target tick and the room resumed on a forked timeline.</summary>
+    Rewound,
+
+    /// <summary>The server has no replay engine / history stores wired, so rewind is unavailable.</summary>
+    NotRewindable,
+
+    /// <summary>No live room is placed for the key (nothing to rewind).</summary>
+    NotFound,
+
+    /// <summary>The target tick predates the retained rewind horizon; the point is unreachable.</summary>
+    BeyondHorizon,
+
+    /// <summary>Replay hit corrupt/unrecognized history; no rewind was performed.</summary>
+    Failed,
+}

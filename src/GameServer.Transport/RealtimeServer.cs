@@ -70,6 +70,17 @@ public sealed class RealtimeServer
     private readonly ISessionRouter _router;
     private readonly ISnapshotStore<RoomKey, RoomSnapshot> _snapshots;
     private readonly IEventLog<RoomKey, RoomEvent> _events;
+    // The richer capabilities of the same injected stores, when wired (the in-memory/file/Postgres
+    // stores all implement these). Non-null enables checkpoint history + rewind: TickRoom writes
+    // periodic checkpoints and prunes to the horizon, and RewindRoom restores a past tick and forks
+    // the timeline. Null (a latest-only store, e.g. a minimal unit harness) keeps the legacy
+    // save-every-tick behavior and makes rewind unavailable.
+    private readonly ISnapshotHistoryStore<RoomKey, RoomSnapshot>? _snapshotHistory;
+    private readonly IRewindableEventLog<RoomKey, RoomEvent>? _rewindableEvents;
+    // How often (in ticks) a durable checkpoint is written when a history store is wired. 1 = every
+    // tick (finest rewind granularity); larger spaces checkpoints out to trade rewind precision for
+    // fewer writes (replay covers the gap from the nearest earlier checkpoint).
+    private readonly int _checkpointEveryTicks;
     private readonly ITelemetrySink _telemetry;
     private readonly Func<GameId, ReplicationPolicy> _policyProvider;
     private readonly RoomLifecycle _lifecycle;
@@ -126,6 +137,13 @@ public sealed class RealtimeServer
 
     private readonly ConcurrentDictionary<RoomKey, ConcurrentDictionary<ConnectionId, Connection>> _subscribers = new();
     private readonly ConcurrentDictionary<RoomKey, Replicator> _replicators = new();
+    // The game placed in each live room, recorded at creation and removed at teardown (via RemoveRoom).
+    // Rewind needs it to rebuild the room through the replay engine's game factory; the room itself does
+    // not carry its GameId.
+    private readonly ConcurrentDictionary<RoomKey, GameId> _roomGames = new();
+    // The deterministic replay engine, when wired. Non-null (with the history + rewindable stores) is
+    // what enables RewindRoom; null leaves rewind unavailable. Wired only at the composition root.
+    private readonly RoomReplayService? _replay;
     // Serializes a room's join (subscribe + create) against its teardown so the two can
     // never interleave. Only taken on the Reap path; Persist keeps the original behavior.
     private readonly ConcurrentDictionary<RoomKey, object> _roomLocks = new();
@@ -147,7 +165,9 @@ public sealed class RealtimeServer
         ITenantRateLimiter? rateLimiter = null,
         ITenantMetricsSink? tenantMetrics = null,
         int maxCommandBytes = 0,
-        IDegradationController? degradation = null)
+        IDegradationController? degradation = null,
+        int checkpointEveryTicks = 1,
+        RoomReplayService? replay = null)
     {
         _tenants = tenants;
         _roomDirectory = roomDirectory;
@@ -159,6 +179,12 @@ public sealed class RealtimeServer
         _router = router;
         _snapshots = snapshots;
         _events = events;
+        // Same instances, surfaced through their richer ports when supported (LSP: a history store IS-A
+        // snapshot store, a rewindable log IS-A log). Captured once so the hot path does no repeated casts.
+        _snapshotHistory = snapshots as ISnapshotHistoryStore<RoomKey, RoomSnapshot>;
+        _rewindableEvents = events as IRewindableEventLog<RoomKey, RoomEvent>;
+        _checkpointEveryTicks = checkpointEveryTicks > 0 ? checkpointEveryTicks : 1;
+        _replay = replay;
         _telemetry = telemetry;
         // Per-game replication policy comes from the control plane; default to the
         // conservative everyone/full policy (which still benefits from batching).
@@ -481,6 +507,7 @@ public sealed class RealtimeServer
                 }
 
                 _router.TryRemoveRoom(key);
+                _roomGames.TryRemove(key, out _);
                 // Relinquish cluster ownership as the room goes away, so OwnedCount tracks live rooms
                 // and another node can take this room later. No-op when clustering is not wired.
                 _roomDirectory?.Release(key, _localNode);
@@ -535,12 +562,86 @@ public sealed class RealtimeServer
 
             _replicators.TryRemove(key, out _);
             _router.TryRemoveRoom(key);
+            _roomGames.TryRemove(key, out _);
             // Relinquish the cluster ownership claim so the directory's OwnedCount tracks live rooms and
             // another node may later take this room. No-op when clustering is not wired.
             _roomDirectory?.Release(key, _localNode);
             _telemetry.Event(TelemetryEvents.RoomClosed,
                 Tags(("roomId", key.RoomId.Value), ("tenantId", key.TenantId.Value), ("reason", reason)));
             return true;
+        }
+    }
+
+    /// <summary>
+    /// Rewinds a live room's authoritative state to <paramref name="targetTick"/> and resumes it on a
+    /// FORKED timeline — the events after the target are discarded. Under the room lock (so it never
+    /// interleaves with the swapped room's tick/join/leave) it: rebuilds the state as of the target via
+    /// the deterministic replay engine (a sandbox room), atomically swaps that into the router, persists
+    /// a fresh checkpoint at the target and drops events after it, and resets each connected viewer's
+    /// replication baseline so the next tick sends a full keyframe — the correction that snaps clients
+    /// onto the rewound state (stale client command sequences were cleared by the restore). Returns the
+    /// outcome; emits <see cref="TelemetryEvents.RoomRewound"/> on success.
+    /// </summary>
+    /// <remarks>
+    /// Requires the replay engine and the history + rewindable stores to be wired (otherwise
+    /// <see cref="RoomRewindOutcome.NotRewindable"/>). The CALLER must ensure the room is not being
+    /// ticked concurrently for the duration (the bulk coordinator holds a tick pause gate; a manual
+    /// driver must be quiesced) — the room lock serializes against admission/join, not against an
+    /// already-in-flight tick that fetched the prior room instance.
+    /// </remarks>
+    public RoomRewindOutcome RewindRoom(RoomKey key, long targetTick, string reason)
+    {
+        if (_replay is null || _snapshotHistory is null || _rewindableEvents is null)
+        {
+            return RoomRewindOutcome.NotRewindable;
+        }
+
+        lock (RoomLock(key))
+        {
+            if (!_router.TryGetRoom(key, out var current) || !_roomGames.TryGetValue(key, out var gameId))
+            {
+                return RoomRewindOutcome.NotFound;
+            }
+
+            // Rebuild state as of the target tick in a sandbox (never registered). Serialize against an
+            // in-flight tick/command on the current instance while we rebuild and swap.
+            RoomReplayResult replay;
+            lock (current)
+            {
+                replay = _replay.ReplayTo(key, gameId, targetTick);
+                switch (replay.Outcome)
+                {
+                    case RoomReplayOutcome.BeyondHorizon:
+                        return RoomRewindOutcome.BeyondHorizon;
+                    case RoomReplayOutcome.Failed:
+                        return RoomRewindOutcome.Failed;
+                }
+
+                // Swap the rebuilt room in atomically, then fork the timeline: a fresh checkpoint AT the
+                // target becomes the new restore base, and every event after the target is discarded so
+                // the authoritative log has no invalid future.
+                _router.TryReplaceRoom(key, replay.Room!);
+                _snapshotHistory.Save(key, replay.Room!.Snapshot());
+                _rewindableEvents.DiscardAfter(key, targetTick);
+            }
+
+            // Correct connected clients: reset each viewer's delta baseline so the next tick re-establishes
+            // a full keyframe carrying the rewound state, which the client replaces its view with.
+            if (_replicators.TryGetValue(key, out var replicator) &&
+                _subscribers.TryGetValue(key, out var connections))
+            {
+                foreach (var connection in connections.Values)
+                {
+                    replicator.Resubscribe(new ViewerId(connection.Id.Value));
+                }
+            }
+
+            _telemetry.Increment(TelemetryMetrics.RoomRewindCount,
+                Tags(("roomId", key.RoomId.Value), ("tenantId", key.TenantId.Value)));
+            _telemetry.Event(TelemetryEvents.RoomRewound,
+                Tags(("roomId", key.RoomId.Value), ("tenantId", key.TenantId.Value),
+                    ("toTick", targetTick.ToString()), ("reason", reason)));
+            return RoomRewindOutcome.Rewound;
         }
     }
 
@@ -614,7 +715,20 @@ public sealed class RealtimeServer
             world = room.Project();
         }
 
-        _snapshots.Save(key, result.Snapshot);
+        // Persist authoritative state. With a history store wired, write a CHECKPOINT on the configured
+        // cadence — these accumulate as the rewind history. Otherwise keep the latest-snapshot behavior.
+        if (_snapshotHistory is not null)
+        {
+            if (_checkpointEveryTicks <= 1 || result.Snapshot.Tick % _checkpointEveryTicks == 0)
+            {
+                _snapshotHistory.Save(key, result.Snapshot);
+            }
+        }
+        else
+        {
+            _snapshots.Save(key, result.Snapshot);
+        }
+
         foreach (var roomEvent in result.Events)
         {
             _events.Append(key, roomEvent);
@@ -622,10 +736,7 @@ public sealed class RealtimeServer
 
         if (_eventLogRetentionTicks > 0)
         {
-            // The snapshot just saved captures all state through this tick, so events at or
-            // below (tick - retention) are no longer needed for recovery: compact them away
-            // and keep only a trailing window. This bounds an otherwise unbounded log.
-            _events.TruncateThrough(key, result.Snapshot.Tick - _eventLogRetentionTicks);
+            PruneToHorizon(key, result.Snapshot.Tick);
         }
 
         if (!_subscribers.TryGetValue(key, out var connections))
@@ -749,6 +860,33 @@ public sealed class RealtimeServer
         // SLO-bearing signal and is always emitted). Under ShedTelemetry+ the ladder drops it to reclaim
         // CPU on the hottest path; authoritative state and the snapshot itself are unaffected.
         EmitNonCriticalEvent(TelemetryEvents.SnapshotEmitted, Tags(("roomId", key.RoomId.Value), ("tick", result.Snapshot.Tick.ToString())));
+    }
+
+    /// <summary>
+    /// Bounds persisted history to the rewind horizon. With a history store wired, it drops checkpoints
+    /// older than the floor at the horizon (keeping that floor as the restore base) and then drops events
+    /// already folded into that floor — so any tick in the horizon window stays replayable while the log
+    /// and history cannot grow without bound. With only a latest-only store, it keeps the original
+    /// behavior: the saved snapshot covers everything through the current tick, so older events compact away.
+    /// </summary>
+    private void PruneToHorizon(RoomKey key, long currentTick)
+    {
+        var watermark = currentTick - _eventLogRetentionTicks;
+
+        if (_snapshotHistory is not null && _rewindableEvents is not null)
+        {
+            _snapshotHistory.PruneThrough(key, watermark);
+            if (_snapshotHistory.TryGetLatestAtOrBefore(key, watermark, out var floor))
+            {
+                // Events at or below the retained floor checkpoint are folded into it (replay starts
+                // strictly after the checkpoint tick), so they are safe to compact away.
+                _rewindableEvents.TruncateThrough(key, floor.Tick);
+            }
+
+            return;
+        }
+
+        _events.TruncateThrough(key, watermark);
     }
 
     /// <summary>
@@ -914,6 +1052,9 @@ public sealed class RealtimeServer
             else
             {
                 var room = _router.GetOrCreateRoom(session.Tenant, join.RoomId, gameId);
+                // Remember the room's game so a later rewind can rebuild it through the replay factory
+                // (the room does not carry its GameId). Cleared in RemoveRoom on teardown.
+                _roomGames[key] = gameId;
 
                 // The game's own admission rule runs before any membership is granted. A refusal
                 // leaves NO membership, NO subscriber, NO replicator. If the room was created just
@@ -935,6 +1076,7 @@ public sealed class RealtimeServer
                     {
                         room.Terminate();
                         _router.TryRemoveRoom(key);
+                        _roomGames.TryRemove(key, out _);
                     }
                 }
                 else
@@ -1037,13 +1179,14 @@ public sealed class RealtimeServer
                     }
 
                     _router.TryRemoveRoom(key);
+                    _roomGames.TryRemove(key, out _);
                     _roomDirectory?.Release(key, _localNode);
-                    _telemetry.Event(TelemetryEvents.RoomClosed, Tags(("roomId", key.RoomId.Value), ("tenantId", key.TenantId.Value)));
+                    _telemetry.Event(TelemetryEvents.RoomClosed, Tags(("roomId", key.RoomId.Value), ("tenantId", key.TenantId.Value), ("traceId", inbound.TraceId)));
                 }
             }
         }
 
-        _telemetry.Event(TelemetryEvents.RoomLeft, Tags(("roomId", key.RoomId.Value), ("playerId", player.Value)));
+        _telemetry.Event(TelemetryEvents.RoomLeft, Tags(("roomId", key.RoomId.Value), ("playerId", player.Value), ("traceId", inbound.TraceId)));
 
         // Tell the (still-connected) client its leave took effect, while the connection still
         // carries the room/player context on the envelope, then clear membership.

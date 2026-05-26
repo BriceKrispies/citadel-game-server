@@ -307,6 +307,54 @@ public sealed class GameRoomTests
         Assert.NotEqual(originalPos, replayedPos); // seedless replay diverges: the seed is load-bearing
     }
 
+    [Fact]
+    public void DeterministicReplay_StochasticGame_FromMidHistoryCheckpoint_YieldsIdenticalState()
+    {
+        // The capability the RNG-STATE header unlocks (the foundation for arbitrary-tick rewind): replay
+        // a stochastic game to a target tick from a checkpoint that is NOT the genesis tick. A seed-only
+        // header cannot do this — reseeding to the start would replay the WRONG draw sequence from the
+        // checkpoint forward. Capturing the RNG's full state at the checkpoint tick restores the EXACT
+        // draw position, so replaying only the post-checkpoint events reproduces the original state.
+        var roomId = new RoomId("arena");
+
+        var originalRandom = new SeededRandomSource(seed: 31337);
+        var original = new GameRoom(roomId, new StochasticWalkGame(originalRandom), new FakeSimulationClock(), originalRandom);
+        original.Join(Player);
+
+        // Advance to tick 3 (the RNG has now drawn three times), then checkpoint HERE — mid-history.
+        for (var seq = 1; seq <= 3; seq++)
+        {
+            original.TryEnqueue(Player, StochasticWalkGame.Step, seq);
+            original.Tick();
+        }
+
+        var midCheckpoint = original.Snapshot(); // tick 3; RngState reflects the three draws so far
+        Assert.Equal(3L, midCheckpoint.Tick);
+        Assert.NotNull(midCheckpoint.RngState);
+
+        // Advance to tick 6, recording the post-checkpoint events (ticks 4..6).
+        var postCheckpointEvents = new List<RoomEvent>();
+        for (var seq = 4; seq <= 6; seq++)
+        {
+            original.TryEnqueue(Player, StochasticWalkGame.Step, seq);
+            postCheckpointEvents.AddRange(original.Tick().Events);
+        }
+
+        var originalPos = StochasticWalkGame.Decode(original.Project().Single().Payload);
+
+        // Fresh room (different construction seed) restored from the mid-history checkpoint, then the
+        // post-checkpoint events replayed. The RNG resumes at its tick-3 position, so draws 4..6 match.
+        var replayRandom = new SeededRandomSource(seed: 1);
+        var replayed = new GameRoom(roomId, new StochasticWalkGame(replayRandom), new FakeSimulationClock(), replayRandom);
+        replayed.RestoreFrom(midCheckpoint);
+        foreach (var recovered in postCheckpointEvents)
+        {
+            Assert.True(replayed.ApplyRecoveredEvent(recovered));
+        }
+
+        Assert.Equal(originalPos, StochasticWalkGame.Decode(replayed.Project().Single().Payload));
+    }
+
     /// <summary>
     /// A stochastic reference game for replay testing: each player has an integer position that a
     /// "Step" command advances by a random amount drawn from the SHARED room random source. Because

@@ -110,20 +110,27 @@ public sealed class GameRoom : IGameRoom
 
     public RoomSnapshot Snapshot() => NewSnapshot(_clock.CurrentTick);
 
-    // Capture the replay header (seed + game-schema version) alongside the opaque state, so a
-    // FRESH process can re-seed an identical random source and replay post-snapshot events to the
-    // identical state. The seed comes from THIS room's deterministic source — never wall-clock.
+    // Capture the replay header (RNG state + seed + game-schema version) alongside the opaque state,
+    // so a FRESH process can resume the identical random sequence and replay post-snapshot events to
+    // the identical state. The RNG state is THIS room's deterministic source captured at its current
+    // draw position — never wall-clock — so a mid-history checkpoint restores exactly, not just genesis.
     private RoomSnapshot NewSnapshot(long tick) =>
-        new(tick, _game.Serialize(), _random.Seed, _game.SchemaVersion);
+        new(tick, _game.Serialize(), _random.Seed, _game.SchemaVersion, _random.CaptureState());
 
     public void RestoreFrom(RoomSnapshot snapshot)
     {
         _game.Restore(snapshot.State);
 
-        // Re-establish the deterministic random sequence from the captured seed so any stochastic
-        // rule replays identically on this (possibly fresh) process. A legacy snapshot without a
-        // header (Seed == 0) leaves the source on its construction seed — the pre-header behavior.
-        if (snapshot.Seed != 0)
+        // Re-establish the deterministic random sequence so any stochastic rule replays identically on
+        // this (possibly fresh) process. Prefer the captured RNG state — it restores the EXACT draw
+        // position, so replay is exact even from a mid-history checkpoint. Fall back to re-seeding from
+        // the legacy seed header (exact only at genesis); a fully headerless snapshot leaves the source
+        // on its construction seed — the pre-header behavior.
+        if (snapshot.RngState is { } rngState)
+        {
+            _random.RestoreState(rngState);
+        }
+        else if (snapshot.Seed != 0)
         {
             _random.Reseed(snapshot.Seed);
         }

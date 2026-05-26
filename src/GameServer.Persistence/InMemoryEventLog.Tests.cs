@@ -72,4 +72,69 @@ public sealed class InMemoryEventLogTests
 
         Assert.Throws<InvalidOperationException>(() => log.TruncateThrough("room", 0));
     }
+
+    [Fact]
+    public void ReadRange_ReturnsEvents_AboveLowExclusive_ThroughHighInclusive()
+    {
+        var log = new InMemoryEventLog<string, int>(e => e);
+        foreach (var seq in new[] { 1, 2, 3, 4, 5 })
+        {
+            log.Append("room", seq);
+        }
+
+        // Half-open low (exclude 2), inclusive high (include 4).
+        Assert.Equal(new[] { 3, 4 }, log.ReadRange("room", fromExclusive: 2, toInclusive: 4));
+    }
+
+    [Fact]
+    public void ReadRange_EmptyWindow_IsEmpty_AndUnknownKey_IsEmpty()
+    {
+        var log = new InMemoryEventLog<string, int>(e => e);
+        foreach (var seq in new[] { 1, 2, 3 })
+        {
+            log.Append("room", seq);
+        }
+
+        Assert.Empty(log.ReadRange("room", fromExclusive: 3, toInclusive: 3));
+        Assert.Empty(log.ReadRange("nope", fromExclusive: 0, toInclusive: 100));
+    }
+
+    [Fact]
+    public void DiscardAfter_DropsEventsStrictlyAboveTheTick_KeepingThePrefix()
+    {
+        var log = new InMemoryEventLog<string, int>(e => e);
+        foreach (var seq in new[] { 1, 2, 3, 4, 5 })
+        {
+            log.Append("room", seq);
+        }
+
+        log.DiscardAfter("room", tick: 3);
+
+        Assert.Equal(new[] { 1, 2, 3 }, log.Read("room"));
+    }
+
+    [Fact]
+    public void DiscardAfter_ThenAppend_ExtendsAFreshTimeline()
+    {
+        var log = new InMemoryEventLog<string, int>(e => e);
+        foreach (var seq in new[] { 1, 2, 3, 4, 5 })
+        {
+            log.Append("room", seq);
+        }
+
+        log.DiscardAfter("room", tick: 2);
+        log.Append("room", 3); // a new, different future after the fork
+
+        Assert.Equal(new[] { 1, 2, 3 }, log.Read("room"));
+    }
+
+    [Fact]
+    public void ReadRange_And_DiscardAfter_WithoutSequenceSelector_Throw()
+    {
+        var log = new InMemoryEventLog<string, int>();
+        log.Append("room", 1);
+
+        Assert.Throws<InvalidOperationException>(() => log.ReadRange("room", 0, 10));
+        Assert.Throws<InvalidOperationException>(() => log.DiscardAfter("room", 0));
+    }
 }

@@ -27,22 +27,30 @@ public enum CommandAdmission
 /// </summary>
 /// <remarks>
 /// <para>
-/// <see cref="Seed"/> and <see cref="GameSchemaVersion"/> form the cross-process REPLAY
-/// HEADER. A snapshot alone restores state at <see cref="Tick"/>; to replay the events
-/// recorded AFTER the snapshot to the identical entity state on a FRESH process, the room's
-/// deterministic random source must be re-seeded with the exact seed the original room used —
+/// <see cref="Seed"/>, <see cref="GameSchemaVersion"/>, and <see cref="RngState"/> form the
+/// cross-process REPLAY HEADER. A snapshot alone restores state at <see cref="Tick"/>; to replay the
+/// events recorded AFTER the snapshot to the identical entity state on a FRESH process, the room's
+/// deterministic random source must continue the EXACT same sequence the original room was on —
 /// otherwise any stochastic rule diverges and replay is non-deterministic. The schema version
 /// records which game-state layout produced <see cref="State"/>, so a restore against an
 /// incompatible game build can be detected rather than silently mis-deserialized.
 /// </para>
 /// <para>
-/// Both are trailing, defaulted parameters so this stays BACK-COMPATIBLE: every existing
+/// <see cref="RngState"/> is the random source's full internal state at <see cref="Tick"/>, captured
+/// via <see cref="IRandomSource.CaptureState"/>. It is what makes arbitrary-tick rewind exact: a
+/// checkpoint taken mid-history restores the RNG to where it actually stood at that tick (its
+/// accumulated draw position), not back to the seed start. <see cref="Seed"/> is retained as a
+/// legacy fallback: a snapshot with no <see cref="RngState"/> (null) but a non-zero seed re-seeds
+/// from the start, which is only exact when the checkpoint is the genesis tick.
+/// </para>
+/// <para>
+/// All three are trailing, defaulted parameters so this stays BACK-COMPATIBLE: every existing
 /// <c>new RoomSnapshot(tick, state)</c> caller compiles unchanged, and a previously-persisted
-/// snapshot JSON (without these fields) deserializes with the defaults — a seed of 0 and an
-/// unversioned schema, exactly the pre-header behavior.
+/// snapshot JSON (without these fields) deserializes with the defaults — no RNG state, seed 0, and
+/// an unversioned schema, exactly the pre-header behavior.
 /// </para>
 /// </remarks>
-public sealed record RoomSnapshot(long Tick, byte[] State, int Seed = 0, int GameSchemaVersion = 0);
+public sealed record RoomSnapshot(long Tick, byte[] State, int Seed = 0, int GameSchemaVersion = 0, long? RngState = null);
 
 /// <summary>
 /// A durable fact for the event log / replay: a player's accepted command at a tick.

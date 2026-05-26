@@ -26,4 +26,19 @@ public interface IRandomSource
     /// post-snapshot replay reproduces the original room's stochastic decisions exactly.
     /// </summary>
     void Reseed(int seed);
+
+    /// <summary>
+    /// Captures the source's full internal state so it can be restored to this EXACT point later.
+    /// Unlike <see cref="Seed"/> (a fixed origin), this reflects every draw made so far. It is the
+    /// rewind/replay seam: a snapshot taken mid-history can restore the RNG to where it actually
+    /// stood at that tick — not back to the seed start — so a stochastic game replays exactly even
+    /// from a checkpoint that is not the genesis tick.
+    /// </summary>
+    long CaptureState();
+
+    /// <summary>
+    /// Restores internal state previously returned by <see cref="CaptureState"/>, so subsequent
+    /// draws continue the identical sequence from that captured point.
+    /// </summary>
+    void RestoreState(long state);
 }

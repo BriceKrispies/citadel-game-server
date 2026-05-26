@@ -30,4 +30,12 @@ public interface ISessionRouter
     /// the last player left). Returns true if a room was removed. A later join recreates it.
     /// </summary>
     bool TryRemoveRoom(RoomKey key);
+
+    /// <summary>
+    /// Atomically replaces the placed room for <paramref name="key"/> with <paramref name="room"/>,
+    /// returning true if a room existed to replace. The swap seam for live rewind: a room rebuilt as
+    /// of a past tick takes over the key in place. The caller is responsible for quiescing the room
+    /// (holding its lock / pausing ticks) so no tick or command is mid-flight across the swap.
+    /// </summary>
+    bool TryReplaceRoom(RoomKey key, IGameRoom room);
 }
