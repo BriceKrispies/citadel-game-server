@@ -30,7 +30,9 @@ public sealed class IntegrationHarness
         ITenantRateLimiter? rateLimiter = null,
         ITenantMetricsSink? tenantMetrics = null,
         int maxCommandBytes = 0,
-        IDegradationController? degradation = null)
+        IDegradationController? degradation = null,
+        TimeSpan? handshakeTimeout = null,
+        IIdleConnectionPolicy? idlePolicy = null)
     {
         var contexts = (tenants ?? new[] { "tenant-a" })
             .Select(t => new TenantContext(new TenantId(t), $"Tenant {t}"));
@@ -45,7 +47,7 @@ public sealed class IntegrationHarness
         Server = new RealtimeServer(
             Tenants, Router, Snapshots, Events, Telemetry, policy, lifecycle, admission, eventLogRetentionTicks,
             rateLimiter: rateLimiter, tenantMetrics: tenantMetrics, maxCommandBytes: maxCommandBytes,
-            degradation: degradation);
+            degradation: degradation, handshakeTimeout: handshakeTimeout, idlePolicy: idlePolicy);
     }
 
     public InMemoryTenantResolver Tenants { get; }
@@ -139,6 +141,79 @@ public sealed class IntegrationHarness
         public async Task CloseAsync()
         {
             Transport.CompleteClient();
+            await Loop;
+        }
+    }
+
+    /// <summary>
+    /// Opens a held-open client that has already said hello + joined its room, then leaves the
+    /// connection live so a load scenario can inject commands over many ticks and drain what the
+    /// server pushed back. Unlike <see cref="RunClientAsync"/> (which closes after a fixed command
+    /// list), this models a real, sustained player connection: send-as-you-go, read-as-you-go, and
+    /// reconnect by opening a fresh one. The hello + join are queued before the server loop starts,
+    /// so the connection is established without a handshake-timeout race.
+    /// </summary>
+    public LabClient OpenLabClient(string tenant, string room, string player, string game, long startSequence = 1)
+    {
+        var transport = new InMemoryBidirectionalTransport(new ConnectionId($"{tenant}:{room}:{player}:{Guid.NewGuid():n}"));
+        transport.ClientSend(Envelope(MessageType.ClientHello, new ClientHello(player), tenant, game, room: null, player, sequence: 0));
+        transport.ClientSend(Envelope(MessageType.ClientJoinRoom, new ClientJoinRoom(new RoomId(room)), tenant, game, room, player, sequence: 0));
+
+        var claims = new JoinTokenClaims(
+            tenant, game, room, player, DateTimeOffset.UnixEpoch, DateTimeOffset.UnixEpoch.AddHours(1));
+        var loop = Server.HandleConnectionAsync(transport, claims);
+        return new LabClient(transport, loop, tenant, game, room, player, startSequence);
+    }
+
+    /// <summary>
+    /// A live, held-open virtual client for the load lab. Tracks its own monotonic command
+    /// sequence (hello/join used sequence 0, commands start at 1), forwards game commands as the
+    /// real <see cref="ClientCommand"/> the room applies, and exposes a drain of everything the
+    /// server pushed (snapshots, errors). Nested so it can reuse the harness's envelope builder.
+    /// </summary>
+    public sealed class LabClient
+    {
+        private readonly InMemoryBidirectionalTransport _transport;
+        private long _sequence;
+
+        internal LabClient(InMemoryBidirectionalTransport transport, Task loop, string tenant, string game, string room, string player, long startSequence)
+        {
+            _transport = transport;
+            Loop = loop;
+            Tenant = tenant;
+            Game = game;
+            Room = room;
+            Player = player;
+            _sequence = startSequence;
+        }
+
+        public string Tenant { get; }
+        public string Game { get; }
+        public string Room { get; }
+        public string Player { get; }
+
+        /// <summary>
+        /// The next command sequence this client will send. The room gates commands per PLAYER on a
+        /// monotonic sequence, and that high-water mark survives a reconnect — so a replacement
+        /// connection must RESUME from here, not reset to 1, or its commands are rejected as stale.
+        /// </summary>
+        public long NextSequence => _sequence;
+
+        /// <summary>The server-side connection loop; completes after <see cref="CloseAsync"/>.</summary>
+        public Task Loop { get; }
+
+        /// <summary>Enqueues one game command as the client (monotonic sequence). Never awaits the server.</summary>
+        public void Send(string command) =>
+            _transport.ClientSend(Envelope(
+                MessageType.ClientCommand, new ClientCommand(command), Tenant, Game, Room, Player, _sequence++));
+
+        /// <summary>Drains every server-pushed envelope buffered so far (snapshots, errors), in order.</summary>
+        public IReadOnlyList<MessageEnvelope> DrainReceived() => _transport.DrainOutbound();
+
+        /// <summary>Closes the client side; the server loop then unwinds (and reaps under Reap).</summary>
+        public async Task CloseAsync()
+        {
+            _transport.CompleteClient();
             await Loop;
         }
     }
