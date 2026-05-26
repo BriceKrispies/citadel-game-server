@@ -16,8 +16,7 @@ namespace GameServer.Tenancy;
 /// driver ticks every active room each cycle regardless of tenant cost). It is therefore a dormant seam,
 /// not an active control — do not present per-tenant CPU fairness as a shipped capability. Wiring it
 /// requires reconciling tenant fairness with the Wave-6 invariant that the authoritative simulation is
-/// NEVER dropped: an "over budget" room must be DEFERRED within the cadence, never skipped. Tracked in
-/// tickets/FINAL-GAP-REPORT.md (Gap B).
+/// NEVER dropped: an "over budget" room must be DEFERRED within the cadence, never skipped.
 /// </remarks>
 public interface ITenantComputeBudget
 {
