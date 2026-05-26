@@ -129,12 +129,32 @@ if (string.Equals(builder.Configuration["Persistence:Backend"], "Postgres", Stri
 }
 else
 {
-    builder.Services.AddSingleton<ISnapshotStore<RoomKey, RoomSnapshot>>(_ => new InMemorySnapshotStore<RoomKey, RoomSnapshot>());
-    // The tick selector lets the log compact events folded into a snapshot (see retention below).
+    // A checkpoint HISTORY store (not latest-only) so a room can be rewound to any retained past tick;
+    // the tick selector orders checkpoints. RealtimeServer detects the richer port and enables rewind.
+    builder.Services.AddSingleton<ISnapshotStore<RoomKey, RoomSnapshot>>(_ =>
+        new InMemorySnapshotHistoryStore<RoomKey, RoomSnapshot>(s => s.Tick));
+    // The tick selector lets the log compact events folded into a snapshot (see retention below) and
+    // supports the rewindable range-read / timeline-fork operations.
     builder.Services.AddSingleton<IEventLog<RoomKey, RoomEvent>>(_ => new InMemoryEventLog<RoomKey, RoomEvent>(e => e.Tick));
 }
-builder.Services.AddSingleton<ISessionRouter>(_ => new InMemorySessionRouter(
-    (roomId, gameId) => new GameRoom(roomId, GameFor(gameId), new LogicalSimulationClock(), new SeededRandomSource())));
+// The room factory is shared by the router (live placement) and the replay engine (rebuilding a room
+// as of a past tick) so a rewound, swapped-in room is built exactly like the one it replaces.
+GameRoomFactory roomFactory = (roomId, gameId) =>
+    new GameRoom(roomId, GameFor(gameId), new LogicalSimulationClock(), new SeededRandomSource());
+builder.Services.AddSingleton<ISessionRouter>(_ => new InMemorySessionRouter(roomFactory));
+
+// The deterministic replay engine, wired only when the stores support history + rewind (the in-memory
+// host today; the Postgres adapter is latest-only until its history schema lands, so rewind is simply
+// unavailable there rather than wrong). RealtimeServer/coordinator consult it via GetService (nullable).
+builder.Services.AddSingleton<RoomReplayService>(sp =>
+    sp.GetRequiredService<ISnapshotStore<RoomKey, RoomSnapshot>>() is ISnapshotHistoryStore<RoomKey, RoomSnapshot> history
+    && sp.GetRequiredService<IEventLog<RoomKey, RoomEvent>>() is IRewindableEventLog<RoomKey, RoomEvent> rewindable
+        ? new RoomReplayService(history, rewindable, roomFactory, sp.GetRequiredService<ITelemetrySink>())
+        : null!);
+
+// Shared quiesce gate between the tick driver and the rewind coordinator: a bulk/single rewind pauses
+// ticking while it swaps room state, so no room is ticked mid-swap.
+builder.Services.AddSingleton<TickGate>();
 // Admission ceilings are enforced at the edge so a burst sheds cleanly instead of driving the
 // process over capacity. Configurable (Realtime:*) with finite defaults sized for this node;
 // never unbounded in a deployed host.
@@ -185,7 +205,20 @@ builder.Services.AddSingleton<RealtimeServer>(sp => new RealtimeServer(
     // Graceful-degradation ladder, consulted ON the hot path (HandleConnectionAsync / HandleJoinAsync /
     // TickRoom): refuse new connections/rooms and shed optional telemetry/spectator pushes under sustained
     // tick overload, never the authoritative simulation. Required here; the tick driver feeds it.
-    degradation: sp.GetRequiredService<IDegradationController>()));
+    degradation: sp.GetRequiredService<IDegradationController>(),
+    // How often a durable checkpoint is written (with a history store): 1 = every tick (finest rewind
+    // granularity). eventLogRetentionTicks above is the rewind HORIZON — how far back a room can be rewound.
+    checkpointEveryTicks: builder.Configuration.GetValue("Realtime:CheckpointEveryTicks", 1),
+    // The replay engine enables live rewind; null (Postgres today) leaves RewindRoom returning NotRewindable.
+    replay: sp.GetService<RoomReplayService>()));
+
+// Orchestrates rewinding one room, a whole tenant's rooms, or every room — holding the tick gate for
+// the batch so swaps never race the tick driver. The admin endpoints below drive it.
+builder.Services.AddSingleton<RoomRewindCoordinator>(sp => new RoomRewindCoordinator(
+    sp.GetRequiredService<RealtimeServer>(),
+    sp.GetRequiredService<ISessionRouter>(),
+    sp.GetRequiredService<TickGate>(),
+    sp.GetRequiredService<ITelemetrySink>()));
 // Rooms are independent state owners, so tick them concurrently across all cores; one
 // slow room must not block the rest (head-of-line blocking).
 builder.Services.AddSingleton<IRoomTickScheduler>(_ => ParallelRoomTickScheduler.ForProcessorCount());
@@ -219,7 +252,9 @@ builder.Services.AddSingleton<RoomTickService>(sp => new RoomTickService(
     sp.GetRequiredService<RoomScopedMetrics>(),
     sp.GetRequiredService<ILogger<RoomTickService>>(),
     sp.GetRequiredService<IDegradationController>(),
-    tickHz));
+    tickHz,
+    // Shared with the rewind coordinator: the driver skips a cycle while a rewind holds the gate.
+    sp.GetRequiredService<TickGate>()));
 builder.Services.AddSingleton<ISupervisedWorker>(sp => sp.GetRequiredService<RoomTickService>());
 builder.Services.AddSingleton<TelemetryFlushService>();
 builder.Services.AddSingleton<ISupervisedWorker>(sp => sp.GetRequiredService<TelemetryFlushService>());
@@ -976,6 +1011,89 @@ api.MapPost("/admin/rooms/{tenantId}/{roomId}/terminate", (HttpContext ctx, stri
     return Results.Ok(new { tenantId, roomId, terminated = true });
 });
 
+// ---- Replay / rewind (time travel) ------------------------------------------
+// READ-ONLY replay: reconstruct a room AS OF a past tick in a sandbox and return its projected state,
+// never touching the live room. Read-level authorization (operators and above), tenant-scoped.
+api.MapGet("/admin/rooms/{tenantId}/{roomId}/replay/{toTick:long}",
+    (HttpContext ctx, string tenantId, string roomId, long toTick, RealtimeServer server, IAuditLog audit, IClock clock) =>
+{
+    var target = $"{tenantId}/{roomId}";
+    if (Forbid(ctx, tenantId, "replay-room", target, audit, clock) is { } denied)
+    {
+        return denied;
+    }
+
+    var key = new RoomKey(new TenantId(tenantId), new RoomId(roomId));
+    if (!server.TryReplayRoom(key, toTick, out var observation))
+    {
+        // Either replay is unavailable on this deployment, the room is unknown, or the tick predates the horizon.
+        return Results.NotFound(new ApiError("ReplayUnavailable",
+            $"Cannot replay '{target}' to tick {toTick} (room unknown, beyond the rewind horizon, or replay not enabled)."));
+    }
+
+    Audit(ctx, "replay-room", target, audit, clock, tenantId);
+    return Results.Ok(new
+    {
+        observation.TenantId,
+        observation.RoomId,
+        observation.Tick,
+        entities = observation.Entities.Select(e => new { e.EntityId, e.Version, e.X, e.Y, e.Group }),
+    });
+});
+
+// MUTATING single-room rewind: roll the live room back to a past tick on a forked timeline. Tenant-scoped
+// mutation (game-admin of the room's tenant, or platform-admin). Goes through the gate-holding coordinator
+// so the swap never races the tick driver.
+api.MapPost("/admin/rooms/{tenantId}/{roomId}/rewind/{toTick:long}",
+    (HttpContext ctx, string tenantId, string roomId, long toTick, string? reason,
+     RoomRewindCoordinator coordinator, IAuditLog audit, IClock clock) =>
+{
+    var target = $"{tenantId}/{roomId}";
+    if (ForbidMutation(ctx, tenantId, "rewind-room", target, audit, clock) is { } denied)
+    {
+        return denied;
+    }
+
+    var key = new RoomKey(new TenantId(tenantId), new RoomId(roomId));
+    var report = coordinator.RewindMany(new[] { key }, new RewindToTick(toTick), reason ?? "admin-rewind");
+    var outcome = report.Entries[0].Outcome;
+
+    Audit(ctx, "rewind-room", $"{target}@{toTick}", audit, clock, tenantId);
+    return RewindOutcomeResult(outcome, target, toTick);
+});
+
+// MUTATING per-tenant bulk rewind: rewind every room of one tenant. byTicks rewinds each room back by N
+// from its own tick; otherwise toTick is an absolute target (clamped per room). Tenant-scoped mutation.
+api.MapPost("/admin/tenants/{tenantId}/rewind",
+    (HttpContext ctx, string tenantId, long? byTicks, long? toTick, string? reason,
+     RoomRewindCoordinator coordinator, IAuditLog audit, IClock clock) =>
+{
+    if (ForbidMutation(ctx, tenantId, "rewind-tenant", tenantId, audit, clock) is { } denied)
+    {
+        return denied;
+    }
+
+    var report = coordinator.RewindTenant(new TenantId(tenantId), SelectorFrom(byTicks, toTick), reason ?? "admin-tenant-rewind");
+    Audit(ctx, "rewind-tenant", tenantId, audit, clock, tenantId);
+    return Results.Ok(BulkRewindSummary(report));
+});
+
+// MUTATING global bulk rewind across EVERY tenant's rooms — a fleet-level operation, so PLATFORM-ADMIN
+// only. Always audited. Each per-room op stays within its own tenant's stores, so isolation holds.
+api.MapPost("/admin/rewind",
+    (HttpContext ctx, long? byTicks, long? toTick, string? reason,
+     RoomRewindCoordinator coordinator, IAuditLog audit, IClock clock) =>
+{
+    if (ForbidPlatform(ctx, "rewind-all", "*", audit, clock) is { } denied)
+    {
+        return denied;
+    }
+
+    var report = coordinator.RewindAll(SelectorFrom(byTicks, toTick), reason ?? "admin-global-rewind");
+    Audit(ctx, "rewind-all", "*", audit, clock);
+    return Results.Ok(BulkRewindSummary(report));
+});
+
 // Read the realtime admission ceilings (capacity/limits). Read-only operators and above may read.
 api.MapGet("/admin/limits", (HttpContext ctx, RealtimeServer server, IAuditLog audit, IClock clock) =>
 {
@@ -1429,6 +1547,41 @@ static string TenantOf(string roomLabel)
     var slash = roomLabel.IndexOf('/');
     return slash > 0 ? roomLabel[..slash] : roomLabel;
 }
+
+// Picks the bulk-rewind selector from the query: byTicks (relative, per room) wins over toTick (absolute).
+static IRewindTargetSelector SelectorFrom(long? byTicks, long? toTick) =>
+    byTicks is { } n ? new RewindByTicks(n) : new RewindToTick(toTick ?? 0);
+
+// Maps a single room's rewind outcome to an HTTP result.
+static IResult RewindOutcomeResult(RoomRewindOutcome outcome, string target, long toTick) => outcome switch
+{
+    RoomRewindOutcome.Rewound => Results.Ok(new { target, rewoundToTick = toTick, rewound = true }),
+    RoomRewindOutcome.NotFound => Results.NotFound(new ApiError("RoomNotFound", $"Room '{target}' is not active.")),
+    RoomRewindOutcome.BeyondHorizon => Results.Json(
+        new ApiError("BeyondHorizon", $"Tick {toTick} for '{target}' predates the retained rewind horizon."),
+        statusCode: StatusCodes.Status409Conflict),
+    RoomRewindOutcome.NotRewindable => Results.Json(
+        new ApiError("RewindUnavailable", "Rewind is not enabled on this deployment (no history store wired)."),
+        statusCode: StatusCodes.Status409Conflict),
+    _ => Results.Json(new ApiError("RewindFailed", $"Rewinding '{target}' failed; see telemetry."),
+        statusCode: StatusCodes.Status500InternalServerError),
+};
+
+// Flattens a bulk-rewind report into a JSON summary (tallies + per-room outcomes).
+static object BulkRewindSummary(RoomRewindReport report) => new
+{
+    total = report.Total,
+    rewound = report.Rewound,
+    skipped = report.Skipped,
+    failed = report.Failed,
+    rooms = report.Entries.Select(e => new
+    {
+        tenantId = e.Key.TenantId.Value,
+        roomId = e.Key.RoomId.Value,
+        targetTick = e.TargetTick,
+        outcome = e.Outcome.ToString(),
+    }),
+};
 
 // Selects the game implementation for a room by its game id. (Step 3 will source this
 // from the control-plane catalog; for now it mirrors the catalog's seeded games.)

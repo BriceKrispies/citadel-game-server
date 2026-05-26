@@ -688,6 +688,36 @@ public sealed class RealtimeServer
     }
 
     /// <summary>
+    /// Read-only replay: projects a room's state AS OF <paramref name="targetTick"/> by reconstructing it
+    /// in a sandbox via the replay engine — never touching the live room. Returns false if replay is not
+    /// wired, the room is not placed (so its game is unknown), or the target predates the rewind horizon.
+    /// The "what did this room look like back then?" view, the read-only sibling of <see cref="RewindRoom"/>.
+    /// </summary>
+    public bool TryReplayRoom(RoomKey key, long targetTick, out RoomObservation observation)
+    {
+        observation = null!;
+        if (_replay is null || !_roomGames.TryGetValue(key, out var gameId))
+        {
+            return false;
+        }
+
+        var result = _replay.ReplayTo(key, gameId, targetTick);
+        if (result.Outcome != RoomReplayOutcome.Replayed || result.Room is null)
+        {
+            return false;
+        }
+
+        var world = result.Room.Project();
+        var entities = world
+            .Select(e => new ObservedEntity(e.Id.Value, e.Version, e.Key.X, e.Key.Y, e.Key.Group, Convert.ToBase64String(e.Payload)))
+            .ToList();
+
+        // A replay is a sandbox reconstruction — it has no connected viewers.
+        observation = new RoomObservation(key.TenantId.Value, key.RoomId.Value, result.ReplayedToTick, entities, Array.Empty<ObservedViewer>());
+        return true;
+    }
+
+    /// <summary>
     /// Advances the room one tick, persists the snapshot and events, then runs the
     /// replication pipeline (interest → delta → budget, per the game's policy) and
     /// sends exactly ONE batched <see cref="ServerSnapshot"/> per connection. This

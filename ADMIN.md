@@ -28,6 +28,10 @@ tenants it may act for; a platform-admin key sees all. Every call is audited.
 | GET | `/api/v1/admin/rooms` | active rooms (tenant-scoped) + hottest rooms by tick cost |
 | GET | `/api/v1/admin/rooms/{tenant}/{room}` | one observation (entities + viewers) |
 | GET | `/api/v1/admin/rooms/{tenant}/{room}/observe` | live SSE stream (~4 Hz) of the observation |
+| GET | `/api/v1/admin/rooms/{tenant}/{room}/replay/{toTick}` | **read-only** reconstruction of the room as of a past tick (sandbox; never touches the live room) |
+| POST | `/api/v1/admin/rooms/{tenant}/{room}/rewind/{toTick}?reason=…` | **rewind** the live room to a past tick (game-admin of the tenant, or platform-admin) |
+| POST | `/api/v1/admin/tenants/{tenant}/rewind?byTicks=N\|toTick=N&reason=…` | rewind **every room of one tenant** (game-admin/platform) |
+| POST | `/api/v1/admin/rewind?byTicks=N\|toTick=N&reason=…` | rewind **every room, all tenants** (platform-admin only) |
 
 Example:
 
@@ -54,9 +58,34 @@ and the opaque `payloadBase64`), and every session (`connectionId`, `playerId`,
 > per-viewer baseline, so `pendingSnapshots` stays 0). The hottest-rooms list is the
 > bounded per-room tick-cost telemetry (see `tests/GameServer.IntegrationTests`, gap #6).
 
+## Replay & rewind (time travel)
+
+The server checkpoints each room's authoritative state on a cadence and keeps an append-only
+event log, so a room can be **deterministically reconstructed as of any past tick** within the
+retained *rewind horizon*. Determinism is exact — the snapshot captures the random source's full
+draw position (not just its seed), so even a stochastic game replays identically from a mid-history
+checkpoint.
+
+- **Replay** (`GET …/replay/{toTick}`) rebuilds the room in a sandbox and returns its state at that
+  tick. Read-only: the live room is untouched. Use it to answer "what did this room look like then?".
+- **Rewind** (`POST …/rewind/…`) rolls the *live* room back to a past tick and resumes it on a forked
+  timeline — events after the target are discarded, and connected clients get a corrective keyframe.
+  Bulk variants rewind every room of a tenant, or every room in the fleet (platform-admin only).
+  `byTicks=N` rolls each room back by N from its own tick; `toTick=N` is an absolute target.
+
+> The rewind horizon is `Realtime:EventLogRetentionTicks` (checkpoint cadence:
+> `Realtime:CheckpointEveryTicks`). A target older than the horizon returns `409 BeyondHorizon`.
+> Rewind requires a history-capable snapshot store: it is enabled on the in-memory host today;
+> the durable Postgres path is latest-only until its history schema lands, where rewind returns
+> `409 RewindUnavailable` rather than acting on partial data.
+
 ## Implementation
 
 - `RealtimeServer.TryObserveRoom` — read-only observation, projects under the room lock.
+- `RoomReplayService.ReplayTo` / `ReplaySession` — the deterministic replay engine (restore floor
+  checkpoint + replay events to the target tick); `RealtimeServer.RewindRoom` swaps the rebuilt room
+  in under the room lock and forks the timeline; `RoomRewindCoordinator` holds the `TickGate` so a
+  bulk rewind never races the tick driver.
 - `DeltaCompressor` is now lock-guarded, so an admin observer can read per-viewer lag
   concurrently with the tick/ack threads safely.
 - The browser console reads the SSE stream with `fetch()` + a streaming body reader (not

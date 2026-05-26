@@ -38,4 +38,11 @@ public interface ISessionRouter
     /// (holding its lock / pausing ticks) so no tick or command is mid-flight across the swap.
     /// </summary>
     bool TryReplaceRoom(RoomKey key, IGameRoom room);
+
+    /// <summary>
+    /// Keys of all currently placed rooms — the basis for bulk operations (e.g. rewinding every room
+    /// of a tenant, or every room in the process). Filter by <see cref="RoomKey.TenantId"/> to stay
+    /// within a tenant boundary.
+    /// </summary>
+    IReadOnlyCollection<RoomKey> RoomKeys { get; }
 }
